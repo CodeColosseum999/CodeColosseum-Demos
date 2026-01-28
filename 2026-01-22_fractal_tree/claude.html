@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Fractal Tree</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #000; display: flex; justify-content: center; align-items: center; min-height: 100vh; overflow: hidden; }
+canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  
+  function getParam(name, defaultVal, min, max) {
+    const val = parseFloat(params.get(name));
+    if (!Number.isFinite(val)) return defaultVal;
+    return Math.max(min, Math.min(max, val));
+  }
+  
+  const w = getParam('w', 416, 50, 4096);
+  const h = getParam('h', 416, 50, 4096);
+  const loop = getParam('loop', 10000, 1000, 120000);
+  const speed = getParam('speed', 1, 0.1, 10);
+  
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get 2D context');
+  
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  
+  const maxDepth = 12;
+  const branchAngle = Math.PI / 6;
+  const lengthRatio = 0.72;
+  const initialLength = h * 0.22;
+  const baseWidth = w * 0.025;
+  
+  function seededRandom(seed) {
+    let s = seed;
+    return function() {
+      s = (s * 9301 + 49297) % 233280;
+      return s / 233280;
+    };
+  }
+  
+  let branchSeeds = [];
+  let rand = seededRandom(12345);
+  for (let i = 0; i < 500; i++) {
+    branchSeeds.push({
+      angleOffset: (rand() - 0.5) * 0.3,
+      lengthMult: 0.9 + rand() * 0.2,
+      swayPhase: rand() * Math.PI * 2,
+      swayAmp: 0.5 + rand() * 0.5
+    });
+  }
+  
+  let leafParticles = [];
+  const maxLeaves = 150;
+  
+  function hslToRgb(h, s, l) {
+    let r, g, b;
+    if (s === 0) {
+      r = g = b = l;
+    } else {
+      const hue2rgb = (p, q, t) => {
+        if (t < 0) t += 1;
+        if (t > 1) t -= 1;
+        if (t < 1/6) return p + (q - p) * 6 * t;
+        if (t < 1/2) return q;
+        if (t < 2/3) return p + (q - p) * (2/3 - t) * 6;
+        return p;
+      };
+      const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+      const p = 2 * l - q;
+      r = hue2rgb(p, q, h + 1/3);
+      g = hue2rgb(p, q, h);
+      b = hue2rgb(p, q, h - 1/3);
+    }
+    return [Math.round(r * 255), Math.round(g * 255), Math.round(b * 255)];
+  }
+  
+  function drawBranch(x1, y1, angle, length, depth, progress, time, seedIdx, parentAlpha) {
+    if (depth > maxDepth || length < 2) return;
+    
+    const growthPhase = progress * 1.8;
+    const depthDelay = depth * 0.12;
+    let branchGrowth = Math.max(0, Math.min(1, (growthPhase - depthDelay) * 2.5));
+    
+    if (branchGrowth <= 0) return;
+    
+    const seed = branchSeeds[seedIdx % branchSeeds.length];
+    
+    const windBase = Math.sin(time * 2 + depth * 0.3) * 0.15;
+    const windGust = Math.sin(time * 0.7) * Math.sin(time * 1.3 + seed.swayPhase) * 0.1;
+    const windSway = (windBase + windGust) * seed.swayAmp * (depth / maxDepth);
+    
+    const actualAngle = angle + windSway + seed.angleOffset * 0.3;
+    const actualLength = length * branchGrowth * seed.lengthMult;
+    
+    const x2 = x1 + Math.sin(actualAngle) * actualLength;
+    const y2 = y1 - Math.cos(actualAngle) * actualLength;
+    
+    const widthFactor = Math.pow(0.7, depth);
+    const lineWidth = Math.max(1, baseWidth * widthFactor * branchGrowth);
+    
+    const depthRatio = depth / maxDepth;
+    const hue = 0.08 + depthRatio * 0.25 + Math.sin(time * 0.5) * 0.05;
+    const sat = 0.4 + depthRatio * 0.3;
+    const light = 0.15 + depthRatio * 0.25 + branchGrowth * 0.1;
+    const [r, g, b] = hslToRgb(hue, sat, light);
+    
+    const alpha = parentAlpha * (0.7 + branchGrowth * 0.3);
+    
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+    ctx.lineWidth = lineWidth;
+    ctx.lineCap = 'round';
+    ctx.stroke();
+    
+    if (depth > 2 && lineWidth > 1.5) {
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = `rgba(${Math.min(255, r + 60)},${Math.min(255, g + 40)},${b},${alpha * 0.3})`;
+      ctx.lineWidth = lineWidth * 0.3;
+      ctx.stroke();
+    }
+    
+    if (depth >= maxDepth - 2 && branchGrowth > 0.8) {
+      const leafChance = 0.15 + Math.sin(time * 3 + seedIdx) * 0.1;
+      if (rand() < leafChance * 0.1 && leafParticles.length < maxLeaves) {
+        leafParticles.push({
+          x: x2,
+          y: y2,
+          vx: (rand() - 0.5) * 0.5 + windBase * 20,
+          vy: rand() * 0.5 + 0.2,
+          life: 1,
+          hue: 0.25 + rand() * 0.15,
+          size: 2 + rand() * 3,
+          rotation: rand() * Math.PI * 2,
+          rotSpeed: (rand() - 0.5) * 0.1
+        });
+      }
+    }
+    
+    if (branchGrowth > 0.3) {
+      const newLength = length * lengthRatio;
+      const angleSpread = branchAngle * (0.8 + depthRatio * 0.4);
+      
+      drawBranch(x2, y2, actualAngle - angleSpread, newLength, depth + 1, progress, time, seedIdx * 2 + 1, alpha);
+      drawBranch(x2, y2, actualAngle + angleSpread, newLength, depth + 1, progress, time, seedIdx * 2 + 2, alpha);
+      
+      if (depth < 4 && branchGrowth > 0.7 && seed.lengthMult > 1.0) {
+        drawBranch(x2, y2, actualAngle, newLength * 0.8, depth + 1, progress, time, seedIdx * 3, alpha * 0.7);
+      }
+    }
+  }
+  
+  function updateLeaves(dt, wind) {
+    for (let i = leafParticles.length - 1; i >= 0; i--) {
+      const leaf = leafParticles[i];
+      leaf.vx += wind * 0.5 * dt;
+      leaf.vy += 0.3 * dt;
+      leaf.vx *= 0.99;
+      leaf.x += leaf.vx * dt * 60;
+      leaf.y += leaf.vy * dt * 60;
+      leaf.rotation += leaf.rotSpeed;
+      leaf.life -= dt * 0.3;
+      
+      if (leaf.life <= 0 || leaf.y > h + 20) {
+        leafParticles.splice(i, 1);
+      }
+    }
+  }
+  
+  function drawLeaves() {
+    for (const leaf of leafParticles) {
+      const [r, g, b] = hslToRgb(leaf.hue, 0.6, 0.4);
+      ctx.save();
+      ctx.translate(leaf.x, leaf.y);
+      ctx.rotate(leaf.rotation);
+      ctx.beginPath();
+      ctx.ellipse(0, 0, leaf.size, leaf.size * 0.6, 0, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(${r},${g},${b},${leaf.life * 0.8})`;
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+  
+  function drawGround(time) {
+    const gradient = ctx.createLinearGradient(0, h - 40, 0, h);
+    gradient.addColorStop(0, 'rgba(20, 15, 10, 0)');
+    gradient.addColorStop(1, 'rgba(30, 25, 15, 0.8)');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, h - 40, w, 40);
+    
+    for (let i = 0; i < 20; i++) {
+      const x = (i / 20) * w + Math.sin(time * 2 + i) * 5;
+      const grassHeight = 10 + Math.sin(i * 0.7) * 5;
+      const sway = Math.sin(time * 2 + i * 0.5) * 3;
+      
+      ctx.beginPath();
+      ctx.moveTo(x, h);
+      ctx.quadraticCurveTo(x + sway, h - grassHeight * 0.6, x + sway * 1.5, h - grassHeight);
+      ctx.strokeStyle = `rgba(40, 60, 30, 0.5)`;
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+  }
+  
+  function drawMoon(progress, time) {
+    const moonX = w * 0.8 + Math.sin(time * 0.3) * 10;
+    const moonY = h * 0.15 + Math.cos(time * 0.2) * 5;
+    const moonSize = w * 0.06;
+    
+    const glowGradient = ctx.createRadialGradient(moonX, moonY, moonSize * 0.5, moonX, moonY, moonSize * 3);
+    glowGradient.addColorStop(0, 'rgba(200, 220, 255, 0.15)');
+    glowGradient.addColorStop(0.5, 'rgba(150, 180, 220, 0.05)');
+    glowGradient.addColorStop(1, 'rgba(100, 130, 180, 0)');
+    ctx.fillStyle = glowGradient;
+    ctx.fillRect(0, 0, w, h * 0.5);
+    
+    ctx.beginPath();
+    ctx.arc(moonX, moonY, moonSize, 0, Math.PI * 2);
+    const moonGrad = ctx.createRadialGradient(moonX - moonSize * 0.3, moonY - moonSize * 0.3, 0, moonX, moonY, moonSize);
+    moonGrad.addColorStop(0, 'rgba(255, 255, 240, 0.9)');
+    moonGrad.addColorStop(1, 'rgba(200, 210, 230, 0.7)');
+    ctx.fillStyle = moonGrad;
+    ctx.fill();
+  }
+  
+  function drawStars(time) {
+    rand = seededRandom(54321);
+    for (let i = 0; i < 50; i++) {
+      const x = rand() * w;
+      const y = rand() * h * 0.6;
+      const size = 0.5 + rand() * 1.5;
+      const twinkle = 0.3 + Math.sin(time * 3 + i * 0.7) * 0.3 + 0.4;
+      
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(255, 255, 255, ${twinkle})`;
+      ctx.fill();
+    }
+  }
+  
+  const start = performance.now();
+  
+  function animate() {
+    const now = performance.now();
+    const elapsed = (now - start) * speed;
+    const progress = (elapsed % loop) / loop;
+    const time = (elapsed % loop) / 1000;
+    const dt = 1 / 60;
+    
+    ctx.fillStyle = '#050508';
+    ctx.fillRect(0, 0, w, h);
+    
+    const skyGradient = ctx.createLinearGradient(0, 0, 0, h);
+    skyGradient.addColorStop(0, 'rgba(10, 15, 30, 1)');
+    skyGradient.addColorStop(0.5, 'rgba(15, 20, 35, 1)');
+    skyGradient.addColorStop(1, 'rgba(20, 25, 30, 1)');
+    ctx.fillStyle = skyGradient;
+    ctx.fillRect(0, 0, w, h);
+    
+    drawStars(time);
+    drawMoon(progress, time);
+    
+    const treeX = w / 2;
+    const treeY = h - 20;
+    
+    rand = seededRandom(12345);
+    drawBranch(treeX, treeY, 0, initialLength, 0, progress, time, 0, 1);
+    
+    const wind = Math.sin(time * 2) * 0.15 + Math.sin(time * 0.7) * 0.1;
+    updateLeaves(dt * speed, wind);
+    drawLeaves();
+    
+    drawGround(time);
+    
+    requestAnimationFrame(animate);
+  }
+  
+  animate();
+})();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-22_fractal_tree/claude.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-22_fractal_tree/claude.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Animated Fractal Tree</title>
+<style>
+    * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+    }
+    body {
+        background: #000;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        min-height: 100vh;
+        overflow: hidden;
+    }
+    #container {
+        width: 416px;
+        height: 416px;
+        position: relative;
+    }
+    canvas {
+        display: block;
+        width: 100%;
+        height: 100%;
+    }
+</style>
+</head>
+<body>
+<div id="container">
+    <canvas id="canvas"></canvas>
+</div>
+<script>
+    (function() {
+        'use strict';
+        // Get URL parameters with defaults
+        const params = new URLSearchParams(window.location.search);
+        const w = Math.max(1, parseInt(params.get('w')) || 416);
+        const h = Math.max(1, parseInt(params.get('h')) || 416);
+        const loopMs = Math.max(1, parseInt(params.get('loop')) || 10000);
+        const speed = Math.max(0.01, parseFloat(params.get('speed')) || 1.0);
+        // Setup container and canvas
+        const container = document.getElementById('container');
+        container.style.width = w + 'px';
+        container.style.height = h + 'px';
+        const canvas = document.getElementById('canvas');
+        canvas.width = w;
+        canvas.height = h;
+        const ctx = canvas.getContext('2d');
+        // Animation state
+        let startTime = performance.now();
+        let animationId = null;
+        // Tree parameters
+        const maxDepth = 9;
+        const initialLength = h * 0.25;
+        const minBranchLength = 2;
+        const splitAngle = Math.PI / 4; // 45 degrees
+        const lengthDecay = 0.7;
+        const lineWidthDecay = 0.8;
+        const initialWidth = 6;
+        // Wind parameters
+        const windAmplitude = 0.3;
+        const windFrequency = 0.5;
+        const windPhaseShift = Math.PI * 0.7;
+        // Color palette (hue shift over time)
+        const baseHue = 120; // Green
+        const hueRange = 40;
+        // Seeded pseudo-random for deterministic variation
+        function seededRandom(seed) {
+            const x = Math.sin(seed) * 10000;
+            return x - Math.floor(x);
+        }
+        // Draw a branch with animation progress
+        function drawBranch(x, y, length, angle, width, depth, progress, time) {
+            if (depth >= maxDepth || length < minBranchLength) return;
+            // Calculate actual progress for this branch (delayed based on depth)
+            const branchProgress = Math.max(0, Math.min(1, (progress - depth * 0.1) * 1.5));
+            if (branchProgress <= 0) return;
+            // Apply wind effect
+            const wind = Math.sin(time * windFrequency + depth * windPhaseShift) * windAmplitude;
+            const currentAngle = angle + wind * (1 - depth / maxDepth);
+            // Calculate end point
+            const endX = x + Math.cos(currentAngle) * length * branchProgress;
+            const endY = y + Math.sin(currentAngle) * length * branchProgress;
+            // Color based on depth and time
+            const hue = (baseHue + (depth * 15) + Math.sin(time * 0.3) * hueRange) % 360;
+            const saturation = 70 + depth * 5;
+            const lightness = 30 + depth * 5;
+            const alpha = 0.1 + (depth / maxDepth) * 0.9;
+            // Draw the branch
+            ctx.beginPath();
+            ctx.moveTo(x, y);
+            ctx.lineTo(endX, endY);
+            ctx.strokeStyle = `hsla(${hue}, ${saturation}%, ${lightness}%, ${alpha})`;
+            ctx.lineWidth = width;
+            ctx.lineCap = 'round';
+            ctx.stroke();
+            // Add glow effect for deeper branches
+            if (depth > maxDepth - 3) {
+                ctx.beginPath();
+                ctx.moveTo(x, y);
+                ctx.lineTo(endX, endY);
+                ctx.strokeStyle = `hsla(${hue}, ${saturation}%, ${lightness + 20}%, ${alpha * 0.3})`;
+                ctx.lineWidth = width * 2;
+                ctx.stroke();
+            }
+            // Recursively draw child branches if progress allows
+            if (branchProgress >= 0.5) {
+                const nextLength = length * lengthDecay;
+                const nextWidth = width * lineWidthDecay;
+                const nextDepth = depth + 1;
+                // Add slight random variation to angles
+                const angleVariation = (seededRandom(depth + time) - 0.5) * 0.2;
+                // Left branch
+                drawBranch(
+                    endX, endY,
+                    nextLength,
+                    currentAngle - splitAngle + angleVariation,
+                    nextWidth,
+                    nextDepth,
+                    progress,
+                    time
+                );
+                // Right branch
+                drawBranch(
+                    endX, endY,
+                    nextLength,
+                    currentAngle + splitAngle - angleVariation,
+                    nextWidth,
+                    nextDepth,
+                    progress,
+                    time
+                );
+            }
+        }
+        // Main animation loop
+        function animate() {
+            const currentTime = performance.now();
+            const elapsed = (currentTime - startTime) * speed;
+            const progress = (elapsed % loopMs) / loopMs;
+            const time = progress * Math.PI * 2; // Convert to 0-2π for smooth periodic functions
+            // Clear canvas with fade effect for trails
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.1)';
+            ctx.fillRect(0, 0, w, h);
+            // Draw the tree
+            const trunkX = w / 2;
+            const trunkY = h * 0.9;
+            const trunkAngle = -Math.PI / 2; // Pointing upward
+            // Modulate parameters over the loop
+            const growthProgress = easeInOutCubic(progress);
+            const windIntensity = 0.5 + 0.5 * Math.sin(time * 2);
+            // Draw multiple trees with slight offsets for depth
+            for (let i = 0; i < 3; i++) {
+                const offset = i * 0.1;
+                const adjustedProgress = Math.max(0, Math.min(1, growthProgress - offset));
+                if (adjustedProgress > 0) {
+                    ctx.save();
+                    // Slight horizontal offset for each layer
+                    ctx.translate((i - 1) * 5, 0);
+                    drawBranch(
+                        trunkX,
+                        trunkY,
+                        initialLength * (1 - i * 0.1),
+                        trunkAngle,
+                        initialWidth * (1 - i * 0.2),
+                        0,
+                        adjustedProgress,
+                        time + i * 0.5
+                    );
+                    ctx.restore();
+                }
+            }
+            // Add particle effects during peak growth
+            if (progress > 0.3 && progress < 0.8) {
+                const particleCount = Math.floor(20 * Math.sin(progress * Math.PI));
+                for (let i = 0; i < particleCount; i++) {
+                    const angle = seededRandom(i + time) * Math.PI * 2;
+                    const radius = seededRandom(i + time + 1) * 50;
+                    const px = trunkX + Math.cos(angle) * radius;
+                    const py = trunkY * 0.7 + Math.sin(angle) * radius;
+                    const size = 1 + seededRandom(i + time + 2) * 3;
+                    const hue = (baseHue + 60 + Math.sin(time * 0.5) * 30) % 360;
+                    ctx.beginPath();
+                    ctx.arc(px, py, size, 0, Math.PI * 2);
+                    ctx.fillStyle = `hsla(${hue}, 80%, 70%, 0.6)`;
+                    ctx.fill();
+                }
+            }
+            animationId = requestAnimationFrame(animate);
+        }
+        // Easing function for smooth growth
+        function easeInOutCubic(t) {
+            return t < 0.5
+                ? 4 * t * t * t
+                : 1 - Math.pow(-2 * t + 2, 3) / 2;
+        }
+        // Start animation
+        function init() {
+            startTime = performance.now();
+            if (animationId) cancelAnimationFrame(animationId);
+            animate();
+        }
+        // Handle resize (from URL params)
+        function handleResize() {
+            const newW = Math.max(1, parseInt(params.get('w')) || 416);
+            const newH = Math.max(1, parseInt(params.get('h')) || 416);
+            if (newW !== w || newH !== h) {
+                container.style.width = newW + 'px';
+                container.style.height = newH + 'px';
+                canvas.width = newW;
+                canvas.height = newH;
+            }
+        }
+        // Initialize and set up periodic parameter updates
+        init();
+        // Update parameters every second in case URL changes
+        setInterval(handleResize, 1000);
+        // Clean up on page unload
+        window.addEventListener('beforeunload', () => {
+            if (animationId) cancelAnimationFrame(animationId);
+        });
+    })();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-22_fractal_tree/deepseek.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-22_fractal_tree/deepseek.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

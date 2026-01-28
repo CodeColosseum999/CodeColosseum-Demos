@@ -1,0 +1,25 @@
+# System Requirements
+
+You are a senior creative-coder + frontend engineer. Produce ONE self-contained HTML file with embedded CSS + JS.
+
+TARGET: a polished, visually compelling animation/simulation.
+
+HARD REQUIREMENTS (MUST FOLLOW):
+
+1) Headline behavior check (system-level): the main “promise” of the scene must be clearly visible. It must not be so rare that it often fails to appear. If the concept supports repetition, it should occur multiple times, but at minimum it must occur clearly at least once.
+- No “dead air”: the main visual action must remain clearly present. Avoid designs where the primary effect stalls or disappears for long stretches (e.g., spawners getting blocked so nothing happens for seconds). If the concept uses emission/spawners, ensure emission cannot permanently stall (pick alternate spawn locations, clear the spawn lane, or overwrite when safe).
+
+2) Dark background (#000 or similar).
+- No external assets/resources (no fonts/images/network).
+- Use Canvas 2D, SVG, or CSS only.
+
+4) Make it visually rich (depth, layering, glow/trails, coherent motion).
+- Avoid 'dead time': keep noticeable evolution across the full simulation, not just the first seconds.
+
+Procedurally grow a tree using recursion.
+
+The Setup:
+1. The Seed: Start with a single vertical line (trunk) at the bottom.
+2. The Rule: Every branch splits into two smaller branches at a specific angle.
+3. The Animation: Do not draw it instantly. Animate the 'growth' frame by frame.
+4. The Twist: Apply a dynamic 'Wind' force that sways the angles using a sine wave, making the tree look alive.

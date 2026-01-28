@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Fractal Tree</title>
+<style>
+  body {
+    margin: 0;
+    padding: 0;
+    background-color: #000;
+    overflow: hidden;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    height: 100vh;
+  }
+  canvas {
+    box-shadow: 0 0 20px rgba(0,0,0,0.5);
+  }
+</style>
+</head>
+<body>
+<canvas id="canvas"></canvas>
+<script>
+  // 1. Setup and Config
+  const canvas = document.getElementById('canvas');
+  const ctx = canvas.getContext('2d');
+  
+  // URL Params
+  const urlParams = new URLSearchParams(window.location.search);
+  const width = parseInt(urlParams.get('w')) || 416;
+  const height = parseInt(urlParams.get('h')) || 416;
+  const loopDuration = parseInt(urlParams.get('loop')) || 10000; // ms
+  const speed = parseFloat(urlParams.get('speed')) || 1;
+
+  // Set logical size
+  canvas.width = width;
+  canvas.height = height;
+  
+  // State
+  let startTime = performance.now();
+  
+  // Math helpers
+  const PI = Math.PI;
+  const TWO_PI = PI * 2;
+  const DEG_TO_RAD = PI / 180;
+
+  // Deterministic "Random" (not strictly needed for pure procedural recursion, but good for variation if added)
+  // Simple seeded random to keep tree structure constant per frame if we used randomness
+  let seed = 1234;
+  function random() {
+    const x = Math.sin(seed++) * 10000;
+    return x - Math.floor(x);
+  }
+
+  // 2. The Recursive Tree Function
+  // x, y: starting position
+  // len: length of branch
+  // angle: angle in radians
+  // depth: current recursion depth
+  // maxDepth: max recursion depth
+  // wind: global wind force affecting angle
+  // bloom: 0..1 factor for flower size
+  function drawTree(x, y, len, angle, depth, maxDepth, wind, bloom, t) {
+    if (depth === 0) return;
+
+    // Calculate end point
+    const endX = x + len * Math.cos(angle);
+    const endY = y + len * Math.sin(angle);
+
+    // Draw branch
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(endX, endY);
+    
+    // Style
+    // Thickness tapers with depth
+    ctx.lineWidth = depth * (width / 416) * 1.5; 
+    
+    // Color interpolation: Dark Brown/Blue -> Luminous Cyan -> Pink/White
+    const progress = 1 - (depth / maxDepth); // 0 at trunk, 1 at tips
+    const hue = 200 + progress * 140; // 200(Blue) -> 340(Pink)
+    const sat = 50 + progress * 50;
+    const light = 20 + progress * 60;
+    
+    ctx.strokeStyle = `hsl(${hue}, ${sat}%, ${light}%)`;
+    
+    // Add glow to outer branches
+    if (depth < 4) {
+      ctx.shadowBlur = 10;
+      ctx.shadowColor = `hsl(${hue}, ${sat}%, 50%)`;
+    } else {
+      ctx.shadowBlur = 0;
+    }
+    
+    ctx.stroke();
+
+    // Draw Bloom/Leaf at tips
+    if (depth === 1) {
+      const size = bloom * (width / 416) * 4;
+      if (size > 0.5) {
+        ctx.fillStyle = `hsla(${hue + 20}, 100%, 80%, 0.8)`;
+        ctx.beginPath();
+        ctx.arc(endX, endY, size, 0, TWO_PI);
+        ctx.fill();
+      }
+    }
+
+    // Recursion parameters
+    const nextLen = len * 0.7;
+    // Base spread angle (breathe effect)
+    // 25 degrees base, oscillating slightly
+    const spreadBase = 25 * DEG_TO_RAD; 
+    // Oscillate spread based on T to make tree "breathe"
+    const spreadOsc = Math.sin(t * TWO_PI * 2) * 0.05;
+    const spread = spreadBase + spreadOsc;
+
+    // Wind effect increases with height (inverse depth)
+    // depth goes max -> 0. Height factor goes 0 -> 1
+    const heightFactor = (maxDepth - depth) / maxDepth;
+    const windEffect = wind * heightFactor * heightFactor;
+
+    drawTree(endX, endY, nextLen, angle - spread + windEffect, depth - 1, maxDepth, wind, bloom, t);
+    drawTree(endX, endY, nextLen, angle + spread + windEffect, depth - 1, maxDepth, wind, bloom, t);
+  }
+
+  // 3. Animation Loop
+  function loop() {
+    // Timing logic
+    const now = performance.now();
+    const elapsed = (now - startTime) * speed;
+    const t = (elapsed % loopDuration) / loopDuration; // Normalized 0..1
+
+    // Update visuals based on t
+    
+    // Clear
+    ctx.fillStyle = '#050505';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    
+    // Background gradient (simulating night sky/ground glow)
+    const gradient = ctx.createRadialGradient(width/2, height, width * 0.1, width/2, height/2, width);
+    gradient.addColorStop(0, '#1a0b2e');
+    gradient.addColorStop(1, '#000000');
+    ctx.fillStyle = gradient;
+    ctx.fillRect(0, 0, width, height);
+
+    // Tree Animation Logic
+    
+    // 1. Life Cycle (Growth)
+    // We want a seamless loop. 
+    // T: 0 -> 0.5 (Grow to Full) -> 1.0 (Shrink to Seed)
+    // Use Sine wave for smooth easing
+    const lifePhase = Math.sin(t * PI); 
+    // Ease the growth: Make it pop up quickly and stay up longer
+    const growth = Math.pow(lifePhase, 0.4); 
+
+    // 2. Wind Logic
+    // Sway back and forth. 
+    // Sine wave that matches loop or harmonic
+    // t * TWO_PI * 4 means 4 full sways per loop cycle
+    const windPhase = Math.sin(t * TWO_PI * 3); 
+    const windForce = windPhase * 0.15; // Strength of wind
+
+    // 3. Bloom Logic
+    // Blooms appear at peak growth
+    // Peak is at t=0.5. 
+    // Map t=0.3->0.7 to bloom 0->1->0
+    let bloom = 0;
+    if (t > 0.2 && t < 0.8) {
+        // Map 0.2..0.8 to 0..PI
+        const bloomT = (t - 0.2) / 0.6;
+        bloom = Math.sin(bloomT * PI);
+    }
+
+    // Tree Parameters
+    const maxDepth = 10;
+    const trunkLenBase = height * 0.22;
+    const trunkLen = trunkLenBase * growth;
+    
+    // If tree is too small, don't draw (avoids clutter at t=0/1)
+    if (trunkLen > 1) {
+        ctx.lineCap = 'round';
+        // Start from bottom center
+        drawTree(
+            width / 2, 
+            height, 
+            trunkLen, 
+            -PI / 2, // Pointing up 
+            maxDepth, 
+            maxDepth, 
+            windForce, 
+            bloom,
+            t
+        );
+    }
+
+    // Draw some ambient particles "pollen"
+    // Deterministic particles based on T
+    const particleCount = 40;
+    ctx.fillStyle = 'rgba(200, 230, 255, 0.4)';
+    ctx.shadowBlur = 0;
+    for (let i = 0; i < particleCount; i++) {
+        // Pseudo-random pos based on i
+        const seedI = i * 13.1 + 123;
+        const xBase = ((seedI * 9301 + 49297) % 233280) / 233280 * width;
+        const yBase = ((seedI * 9301 + 49297) % 233280) / 233280 * height;
+        
+        // Motion
+        // Y moves up/down slowly
+        const yOff = ((t * 2 + i/particleCount) % 1) * height;
+        let pY = (yBase - yOff);
+        if (pY < 0) pY += height;
+        
+        // X sways with wind + individual noise
+        const xOff = Math.sin(t * TWO_PI * 3 + i) * (width * 0.05);
+        let pX = xBase + xOff;
+        
+        // Alpha fades near edges of life cycle
+        const alpha = Math.sin(t * PI) * 0.6; // Fade out at start/end of loop
+        
+        if (alpha > 0.01) {
+            ctx.fillStyle = `rgba(200, 230, 255, ${alpha})`;
+            ctx.beginPath();
+            ctx.arc(pX, pY, (i % 3) + 1, 0, TWO_PI);
+            ctx.fill();
+        }
+    }
+
+    requestAnimationFrame(loop);
+  }
+
+  // Start
+  if (ctx) {
+      loop();
+  } else {
+      console.error("Canvas context not found");
+      // Hard error per constraints
+      throw new Error("Canvas 2D context init failed");
+  }
+
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-22_fractal_tree/gemini.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-22_fractal_tree/gemini.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

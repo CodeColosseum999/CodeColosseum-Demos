@@ -1,0 +1,566 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title></title>
+<style>
+    :root { color-scheme: dark; }
+    html, body {
+        margin: 0;
+        padding: 0;
+        background: #000;
+        overflow: hidden;
+    }
+    #frame {
+        position: relative;
+        width: 416px;
+        height: 416px;
+        background: #000;
+    }
+    canvas {
+        display: block;
+        width: 416px;
+        height: 416px;
+        image-rendering: auto;
+    }
+</style>
+</head>
+<body>
+<div id="frame">
+    <canvas id="c"></canvas>
+</div>
+
+<script>
+(() => {
+    "use strict";
+
+    const TAU = Math.PI * 2;
+
+    const params = new URLSearchParams(location.search);
+    const w = sanitizeInt(params.get("w"), 416, 16, 4096);
+    const h = sanitizeInt(params.get("h"), 416, 16, 4096);
+    const loop = sanitizeFloat(params.get("loop"), 10000, 100, 600000);
+    const speed = sanitizeFloat(params.get("speed"), 1, 0.01, 100);
+
+    const frame = document.getElementById("frame");
+    const canvas = document.getElementById("c");
+
+    frame.style.width = w + "px";
+    frame.style.height = h + "px";
+    canvas.style.width = w + "px";
+    canvas.style.height = h + "px";
+
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("Failed to acquire 2D canvas context.");
+
+    const dpr = Math.max(1, Math.min(2.5, window.devicePixelRatio || 1));
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+    // --- deterministic helpers ---
+    function sanitizeInt(v, def, min, max) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return def;
+        const i = Math.floor(n);
+        if (i < min) return min;
+        if (i > max) return max;
+        return i;
+    }
+    function sanitizeFloat(v, def, min, max) {
+        const n = Number(v);
+        if (!Number.isFinite(n)) return def;
+        if (n < min) return min;
+        if (n > max) return max;
+        return n;
+    }
+    function clamp01(x) { return x < 0 ? 0 : (x > 1 ? 1 : x); }
+    function smoothstep(a, b, x) {
+        const t = clamp01((x - a) / (b - a));
+        return t * t * (3 - 2 * t);
+    }
+    function hash32(x) {
+        x |= 0;
+        x ^= x << 13;
+        x ^= x >>> 17;
+        x ^= x << 5;
+        return x >>> 0;
+    }
+    function rand01FromSeed(seed) {
+        const n = hash32(seed);
+        return (n & 0x00ffffff) / 0x01000000;
+    }
+    function lerp(a, b, t) { return a + (b - a) * t; }
+
+    function srgbToLinear(c) {
+        c = c / 255;
+        return c <= 0.04045 ? (c / 12.92) : Math.pow((c + 0.055) / 1.055, 2.4);
+    }
+    function linearToSrgb(c) {
+        c = c <= 0.0031308 ? (c * 12.92) : (1.055 * Math.pow(c, 1 / 2.4) - 0.055);
+        return Math.max(0, Math.min(255, Math.round(c * 255)));
+    }
+    function mixRGB(c1, c2, t) {
+        const r = lerp(srgbToLinear(c1[0]), srgbToLinear(c2[0]), t);
+        const g = lerp(srgbToLinear(c1[1]), srgbToLinear(c2[1]), t);
+        const b = lerp(srgbToLinear(c1[2]), srgbToLinear(c2[2]), t);
+        return [linearToSrgb(r), linearToSrgb(g), linearToSrgb(b)];
+    }
+
+    // --- assets (no network) ---
+    const noiseCanvas = document.createElement("canvas");
+    noiseCanvas.width = 256;
+    noiseCanvas.height = 256;
+    const nctx = noiseCanvas.getContext("2d");
+    if (!nctx) throw new Error("Failed to acquire 2D context for noise canvas.");
+    const noiseImg = nctx.createImageData(noiseCanvas.width, noiseCanvas.height);
+    {
+        let s = 0x2b6f1d9 ^ (w * 73856093) ^ (h * 19349663);
+        for (let i = 0; i < noiseImg.data.length; i += 4) {
+            s = hash32(s + 0x9e3779b9);
+            const r = rand01FromSeed(s);
+            const v = Math.floor(lerp(8, 34, Math.pow(r, 1.6)));
+            noiseImg.data[i + 0] = v;
+            noiseImg.data[i + 1] = v;
+            noiseImg.data[i + 2] = v + 2;
+            noiseImg.data[i + 3] = 255;
+        }
+        nctx.putImageData(noiseImg, 0, 0);
+    }
+    const noisePattern = ctx.createPattern(noiseCanvas, "repeat");
+
+    const bgCanvas = document.createElement("canvas");
+    bgCanvas.width = canvas.width;
+    bgCanvas.height = canvas.height;
+    const bgctx = bgCanvas.getContext("2d");
+    if (!bgctx) throw new Error("Failed to acquire 2D context for background canvas.");
+    {
+        bgctx.setTransform(1, 0, 0, 1, 0, 0);
+        bgctx.fillStyle = "#000";
+        bgctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+
+        const cx = bgCanvas.width * 0.5;
+        const cy = bgCanvas.height * 0.52;
+        const r = Math.min(bgCanvas.width, bgCanvas.height) * 0.62;
+        const g = bgctx.createRadialGradient(cx, cy, r * 0.1, cx, cy, r);
+        g.addColorStop(0.0, "rgba(10, 14, 24, 1)");
+        g.addColorStop(0.45, "rgba(0, 0, 0, 1)");
+        g.addColorStop(1.0, "rgba(0, 0, 0, 1)");
+        bgctx.fillStyle = g;
+        bgctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+
+        const v = bgctx.createRadialGradient(cx, cy, r * 0.3, cx, cy, r * 1.25);
+        v.addColorStop(0.0, "rgba(0,0,0,0)");
+        v.addColorStop(1.0, "rgba(0,0,0,0.92)");
+        bgctx.fillStyle = v;
+        bgctx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+    }
+
+    // Stars (deterministic)
+    const STAR_COUNT = 220;
+    const starX = new Float32Array(STAR_COUNT);
+    const starY = new Float32Array(STAR_COUNT);
+    const starR = new Float32Array(STAR_COUNT);
+    const starP = new Float32Array(STAR_COUNT);
+    const starA = new Float32Array(STAR_COUNT);
+    {
+        let s = 0x6d2b79f5 ^ (w * 2654435761) ^ (h * 1597334677);
+        for (let i = 0; i < STAR_COUNT; i++) {
+            s = hash32(s + 0x9e3779b9);
+            const rx = rand01FromSeed(s);
+            s = hash32(s + 0x9e3779b9);
+            const ry = rand01FromSeed(s);
+            s = hash32(s + 0x9e3779b9);
+            const rr = rand01FromSeed(s);
+            s = hash32(s + 0x9e3779b9);
+            const rp = rand01FromSeed(s);
+
+            starX[i] = rx * w;
+            starY[i] = ry * h;
+            starR[i] = lerp(0.6, 1.6, Math.pow(rr, 2.2));
+            starP[i] = rp * TAU;
+            starA[i] = lerp(0.04, 0.16, Math.pow(rr, 0.6));
+        }
+    }
+
+    // --- tree buffers ---
+    const MAX_DEPTH = 10; // 2^(d+1)-1 = 2047 segments
+    const MAX_SEGS = (1 << (MAX_DEPTH + 1)) - 1;
+    const segX1 = new Float32Array(MAX_SEGS);
+    const segY1 = new Float32Array(MAX_SEGS);
+    const segX2 = new Float32Array(MAX_SEGS);
+    const segY2 = new Float32Array(MAX_SEGS);
+    const segD  = new Uint8Array(MAX_SEGS);
+    let segCount = 0;
+
+    const MAX_LEAVES = 260;
+    const leafX = new Float32Array(MAX_LEAVES);
+    const leafY = new Float32Array(MAX_LEAVES);
+    const leafD = new Uint8Array(MAX_LEAVES);
+    let leafCount = 0;
+
+    const STACK_MAX = MAX_SEGS + 8;
+    const stX = new Float32Array(STACK_MAX);
+    const stY = new Float32Array(STACK_MAX);
+    const stA = new Float32Array(STACK_MAX);
+    const stL = new Float32Array(STACK_MAX);
+    const stD = new Uint8Array(STACK_MAX);
+    const stS = new Uint32Array(STACK_MAX);
+
+    // Depth palettes (precomputed)
+    const strokeRGB = new Array(MAX_DEPTH + 1);
+    const glowRGB = new Array(MAX_DEPTH + 1);
+    {
+        const c0 = [138, 84, 46];   // bark
+        const c1 = [98, 168, 92];   // green
+        const c2 = [80, 210, 220];  // cyan glow
+        const c3 = [190, 255, 240]; // tips
+        for (let d = 0; d <= MAX_DEPTH; d++) {
+            const u = d / MAX_DEPTH;
+            let base;
+            if (u < 0.55) {
+                base = mixRGB(c0, c1, smoothstep(0.0, 0.55, u));
+            } else {
+                base = mixRGB(c1, c2, smoothstep(0.55, 1.0, u));
+            }
+            const glow = mixRGB(c2, c3, Math.pow(u, 1.7));
+            strokeRGB[d] = base;
+            glowRGB[d] = glow;
+        }
+    }
+
+    function windAngle(progress, depth, seed) {
+        const t = TAU * progress;
+        const u = depth / MAX_DEPTH;
+
+        const gust = 0.6 + 0.4 * Math.sin(t * 1.0 + 0.7 * Math.sin(t * 0.5));
+        const tip = 0.18 + 0.82 * Math.pow(u, 1.35);
+
+        const p1 = t * 1.0 + depth * 0.72 + (seed * 0.0000023);
+        const p2 = t * 6.0 + depth * 1.9 + (seed * 0.0000081);
+
+        const a = (Math.sin(p1) + 0.28 * Math.sin(p2)) * (0.06 + 0.42 * tip) * gust;
+
+        // trunk bias (keeps the whole tree breathing together)
+        const trunkBias = (1 - Math.pow(u, 0.8)) * 0.05 * Math.sin(t * 0.9 + 1.7);
+
+        return a + trunkBias;
+    }
+
+    function buildTree(progress) {
+        segCount = 0;
+        leafCount = 0;
+
+        const grow = smoothstep(0.02, 0.62, progress);
+        const fadeOut = 1 - smoothstep(0.84, 0.985, progress);
+
+        // Keep a faint seed at the wrap; avoid hard disappearance.
+        const visibility = 0.18 + 0.82 * fadeOut;
+
+        const depthShown = grow * (MAX_DEPTH + 1.25);
+
+        let sp = 0;
+
+        const rootSeed = 0x1f123bb7 ^ (w * 374761393) ^ (h * 668265263);
+        const rootX = w * 0.5;
+        const rootY = h * 0.94;
+
+        stX[sp] = rootX;
+        stY[sp] = rootY;
+        stA[sp] = -Math.PI * 0.5;
+        stL[sp] = h * 0.285;
+        stD[sp] = 0;
+        stS[sp] = rootSeed >>> 0;
+        sp++;
+
+        const t = TAU * progress;
+
+        while (sp > 0 && segCount < MAX_SEGS) {
+            sp--;
+            const x = stX[sp];
+            const y = stY[sp];
+            const ang0 = stA[sp];
+            const len0 = stL[sp];
+            const d = stD[sp];
+            const seed = stS[sp] >>> 0;
+
+            const reveal = clamp01(depthShown - d);
+            if (reveal <= 0) continue;
+
+            const u = d / MAX_DEPTH;
+
+            // subtle length pulse, loop-safe
+            const pulse = 0.96 + 0.04 * Math.sin(t * 3.0 + (seed * 0.0000047) + d * 0.9);
+
+            const ang = ang0 + windAngle(progress, d, seed);
+            const segLen = len0 * reveal * pulse;
+
+            const dx = Math.cos(ang) * segLen;
+            const dy = Math.sin(ang) * segLen;
+
+            const x2 = x + dx;
+            const y2 = y + dy;
+
+            segX1[segCount] = x;
+            segY1[segCount] = y;
+            segX2[segCount] = x2;
+            segY2[segCount] = y2;
+            segD[segCount] = d;
+            segCount++;
+
+            const fully = reveal >= 0.999;
+
+            if (fully) {
+                // sparse tip lights (deterministic selection)
+                if (d >= MAX_DEPTH - 1 && leafCount < MAX_LEAVES) {
+                    const sel = rand01FromSeed(seed ^ 0x9e3779b9) * (0.35 + 0.65 * u);
+                    if (sel > 0.62) {
+                        leafX[leafCount] = x2;
+                        leafY[leafCount] = y2;
+                        leafD[leafCount] = d;
+                        leafCount++;
+                    }
+                }
+
+                if (d < MAX_DEPTH && sp + 2 < STACK_MAX) {
+                    const nextSeedL = hash32(seed ^ 0xA2C79A43);
+                    const nextSeedR = hash32(seed ^ 0x3F2A1C5D);
+
+                    const rL = rand01FromSeed(nextSeedL);
+                    const rR = rand01FromSeed(nextSeedR);
+
+                    const splitBase = lerp(0.28, 0.72, Math.pow(u, 1.05));
+                    const splitWave = 0.16 * Math.sin(t * 1.0 + (seed * 0.0000061) + d * 0.6);
+                    const split = splitBase + splitWave;
+
+                    // gentle curl makes it feel alive (still loop-safe)
+                    const curl = 0.22 * (1 - u) * Math.sin(t * 1.5 + (seed * 0.0000053));
+
+                    const jitterL = (rL - 0.5) * 0.20;
+                    const jitterR = (rR - 0.5) * 0.20;
+
+                    const scale = lerp(0.74, 0.66, u);
+                    const nextLen = len0 * scale * (0.94 + 0.06 * Math.sin(t * 2.0 + (seed * 0.0000039)));
+
+                    // Push deeper branches first so shallow ones are popped sooner (slightly nicer layering)
+                    stX[sp] = x2;
+                    stY[sp] = y2;
+                    stA[sp] = ang0 + split + curl + jitterR;
+                    stL[sp] = nextLen * (0.98 + 0.04 * (rR - 0.5));
+                    stD[sp] = (d + 1) & 0xff;
+                    stS[sp] = nextSeedR >>> 0;
+                    sp++;
+
+                    stX[sp] = x2;
+                    stY[sp] = y2;
+                    stA[sp] = ang0 - split + curl + jitterL;
+                    stL[sp] = nextLen * (0.98 + 0.04 * (rL - 0.5));
+                    stD[sp] = (d + 1) & 0xff;
+                    stS[sp] = nextSeedL >>> 0;
+                    sp++;
+                }
+            }
+        }
+
+        return { visibility, grow, fadeOut };
+    }
+
+    function drawBackground(progress, meta) {
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
+        ctx.drawImage(bgCanvas, 0, 0, w, h);
+
+        // drifting noise layer (loop-safe)
+        if (noisePattern) {
+            const t = TAU * progress;
+            const ox = Math.sin(t * 0.33) * 22;
+            const oy = Math.cos(t * 0.29) * 18;
+
+            ctx.save();
+            ctx.globalCompositeOperation = "screen";
+            ctx.globalAlpha = 0.16;
+            ctx.translate(ox, oy);
+            ctx.fillStyle = noisePattern;
+            ctx.fillRect(-64, -64, w + 128, h + 128);
+            ctx.restore();
+        }
+
+        // star twinkle
+        {
+            const t = TAU * progress;
+            ctx.globalCompositeOperation = "lighter";
+            ctx.fillStyle = "rgba(180, 220, 255, 1)";
+            for (let i = 0; i < STAR_COUNT; i++) {
+                const tw = 0.35 + 0.65 * Math.pow(0.5 + 0.5 * Math.sin(t * 2.0 + starP[i]), 1.6);
+                const a = starA[i] * tw * (0.55 + 0.45 * meta.visibility);
+                if (a <= 0.001) continue;
+                ctx.globalAlpha = a;
+                const r = starR[i] * (0.8 + 0.2 * tw);
+                const x = starX[i];
+                const y = starY[i];
+                ctx.fillRect(x - r * 0.5, y - r * 0.5, r, r);
+            }
+        }
+
+        // base glow pulse (build -> peak -> dissolve)
+        {
+            const t = TAU * progress;
+            const build = smoothstep(0.10, 0.70, progress) * (1 - smoothstep(0.82, 0.98, progress));
+            const pulse = 0.55 + 0.45 * Math.sin(t * 2.0 + 0.9);
+            const a = 0.22 * build * pulse;
+
+            if (a > 0.001) {
+                const gx = w * 0.5;
+                const gy = h * 0.92;
+                const r = Math.min(w, h) * (0.45 + 0.08 * Math.sin(t));
+                const grad = ctx.createRadialGradient(gx, gy, r * 0.08, gx, gy, r);
+                grad.addColorStop(0.0, "rgba(120, 240, 255, 1)");
+                grad.addColorStop(0.35, "rgba(80, 190, 190, 0.35)");
+                grad.addColorStop(1.0, "rgba(0, 0, 0, 0)");
+                ctx.globalCompositeOperation = "lighter";
+                ctx.globalAlpha = a;
+                ctx.fillStyle = grad;
+                ctx.fillRect(0, 0, w, h);
+            }
+        }
+    }
+
+    function drawTree(progress, meta) {
+        const baseWidth = Math.max(1.0, Math.min(6.2, (Math.min(w, h) * 0.018)));
+
+        // trunk-to-tip alpha profile
+        const alphaByDepth = new Float32Array(MAX_DEPTH + 1);
+        for (let d = 0; d <= MAX_DEPTH; d++) {
+            const u = d / MAX_DEPTH;
+            const a = lerp(0.78, 0.22, Math.pow(u, 0.9));
+            alphaByDepth[d] = a;
+        }
+
+        // Main strokes
+        ctx.globalCompositeOperation = "source-over";
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+
+        for (let d = 0; d <= MAX_DEPTH; d++) {
+            const u = d / MAX_DEPTH;
+
+            ctx.strokeStyle = rgbToCss(strokeRGB[d], 1);
+            ctx.lineWidth = Math.max(0.6, baseWidth * Math.pow(0.70, d));
+            ctx.globalAlpha = meta.visibility * alphaByDepth[d];
+
+            ctx.beginPath();
+            for (let i = 0; i < segCount; i++) {
+                if (segD[i] !== d) continue;
+                ctx.moveTo(segX1[i], segY1[i]);
+                ctx.lineTo(segX2[i], segY2[i]);
+            }
+            ctx.stroke();
+
+            // subtle inner highlight (gives depth)
+            if (d >= 1 && d <= MAX_DEPTH - 2) {
+                ctx.globalAlpha = meta.visibility * alphaByDepth[d] * (0.08 + 0.06 * (1 - u));
+                ctx.lineWidth = Math.max(0.5, (baseWidth * Math.pow(0.70, d)) * 0.55);
+                ctx.strokeStyle = "rgba(255,255,255,1)";
+                ctx.beginPath();
+                for (let i = 0; i < segCount; i++) {
+                    if (segD[i] !== d) continue;
+                    const x1 = segX1[i], y1 = segY1[i], x2 = segX2[i], y2 = segY2[i];
+                    const mx = x1 * 0.55 + x2 * 0.45;
+                    const my = y1 * 0.55 + y2 * 0.45;
+                    ctx.moveTo(mx, my);
+                    ctx.lineTo(x2, y2);
+                }
+                ctx.stroke();
+            }
+        }
+
+        // Glow pass
+        ctx.globalCompositeOperation = "lighter";
+        for (let d = 2; d <= MAX_DEPTH; d++) {
+            const u = d / MAX_DEPTH;
+
+            const a = meta.visibility * lerp(0.10, 0.32, Math.pow(u, 1.3));
+            if (a <= 0.001) continue;
+
+            ctx.globalAlpha = a;
+            ctx.strokeStyle = rgbToCss(glowRGB[d], 1);
+            ctx.shadowColor = rgbToCss(glowRGB[d], 0.9);
+            ctx.shadowBlur = lerp(2, 18, Math.pow(u, 1.2));
+            ctx.lineWidth = Math.max(0.7, (baseWidth * Math.pow(0.70, d)) * lerp(1.6, 2.2, u));
+
+            ctx.beginPath();
+            for (let i = 0; i < segCount; i++) {
+                if (segD[i] !== d) continue;
+                ctx.moveTo(segX1[i], segY1[i]);
+                ctx.lineTo(segX2[i], segY2[i]);
+            }
+            ctx.stroke();
+        }
+        ctx.shadowBlur = 0;
+
+        // Leaf sparks
+        {
+            const t = TAU * progress;
+            const beat = smoothstep(0.18, 0.72, progress) * (1 - smoothstep(0.84, 0.99, progress));
+            const shimmer = 0.55 + 0.45 * Math.sin(t * 3.0 + 2.3);
+            const a = meta.visibility * 0.55 * beat * shimmer;
+
+            if (a > 0.001 && leafCount > 0) {
+                ctx.globalCompositeOperation = "lighter";
+                ctx.globalAlpha = a;
+                ctx.fillStyle = "rgba(190, 255, 240, 1)";
+                ctx.shadowColor = "rgba(120, 240, 255, 0.85)";
+                ctx.shadowBlur = 14;
+
+                for (let i = 0; i < leafCount; i++) {
+                    const d = leafD[i];
+                    const u = d / MAX_DEPTH;
+                    const r = lerp(0.8, 2.2, Math.pow(u, 1.4));
+                    const x = leafX[i];
+                    const y = leafY[i];
+                    ctx.beginPath();
+                    ctx.arc(x, y, r, 0, TAU);
+                    ctx.fill();
+                }
+
+                ctx.shadowBlur = 0;
+            }
+        }
+    }
+
+    function rgbToCss(rgb, a) {
+        return "rgba(" + rgb[0] + "," + rgb[1] + "," + rgb[2] + "," + a + ")";
+    }
+
+    const start = performance.now();
+
+    function frameLoop() {
+        const now = performance.now();
+        const elapsed = (now - start) * speed;
+        const progress = ((elapsed % loop) / loop);
+
+        const meta = buildTree(progress);
+        drawBackground(progress, meta);
+        drawTree(progress, meta);
+
+        requestAnimationFrame(frameLoop);
+    }
+
+    requestAnimationFrame(frameLoop);
+})();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-22_fractal_tree/gpt.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-22_fractal_tree/gpt.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>
