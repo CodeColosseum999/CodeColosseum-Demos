@@ -1,0 +1,20 @@
+You are generating a single, self-contained HTML file that runs a 2D wildfire (forest fire) simulation in the browser using HTML5 Canvas.
+
+Deliverable
+- Output ONE HTML file only (no additional files).
+- Inline all CSS and JavaScript.
+- No external assets (no images/fonts). Avoid external libraries; if you use any, the simulation must still work without them.
+
+Simulation requirements
+- Render a dense forest of trees as green circles on a dark ground/background.
+- Autoplay: start the fire immediately on load (center ignition or a few random ignition points).
+- Each tree has a state machine: Healthy (green) → Burning (hot red/orange/yellow with glow) → Burnt/Ash (black/charcoal).
+- Trees should burn for a short time before becoming ash (fuel consumption, not instantaneous).
+- Fire spread should be driven by:
+  - proximity/distance to burning trees
+  - a global wind vector that biases ignition chance in the wind direction
+- Include a global wind vector that biases ignition chance in the wind direction.
+- Burning trees emit smoke and ember particles that rise and fade out over time.
+
+Output format
+- Return ONLY the complete HTML document.

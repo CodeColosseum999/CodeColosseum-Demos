@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forest Fire Simulation</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            background: #0a0a0a;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            width: 100%;
+            height: 100%;
+        }
+        canvas {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="canvas"></canvas>
+    <script>
+        const params = new URLSearchParams(window.location.search);
+        const W = parseInt(params.get('w')) || 416;
+        const H = parseInt(params.get('h')) || 416;
+        const LOOP = parseInt(params.get('loop')) || 10000;
+        const SPEED = parseFloat(params.get('speed')) || 1;
+
+        const canvas = document.getElementById('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = W;
+        canvas.height = H;
+
+        const TREE_SPACING = 12;
+        const TREE_RADIUS = 5;
+        const BURN_DURATION = 1500;
+        const SPREAD_CHANCE = 0.08;
+
+        const WIND = { x: 0.6, y: -0.2 };
+
+        const STATE = {
+            HEALTHY: 0,
+            BURNING: 1,
+            BURNT: 2
+        };
+
+        let trees = [];
+        let particles = [];
+        let startTime = null;
+        let lastResetTime = 0;
+
+        class Tree {
+            constructor(x, y) {
+                this.x = x;
+                this.y = y;
+                this.state = STATE.HEALTHY;
+                this.burnStart = 0;
+                this.burnProgress = 0;
+                this.radius = TREE_RADIUS * (0.8 + Math.random() * 0.4);
+                this.greenHue = 100 + Math.random() * 40;
+            }
+
+            ignite(time) {
+                if (this.state === STATE.HEALTHY) {
+                    this.state = STATE.BURNING;
+                    this.burnStart = time;
+                }
+            }
+
+            update(time, dt) {
+                if (this.state === STATE.BURNING) {
+                    this.burnProgress = (time - this.burnStart) / BURN_DURATION;
+
+                    if (Math.random() < 0.3 * SPEED) {
+                        particles.push(new Particle(
+                            this.x + (Math.random() - 0.5) * this.radius,
+                            this.y + (Math.random() - 0.5) * this.radius,
+                            Math.random() < 0.7 ? 'smoke' : 'ember'
+                        ));
+                    }
+
+                    if (this.burnProgress >= 1) {
+                        this.state = STATE.BURNT;
+                    }
+                }
+            }
+
+            draw() {
+                ctx.beginPath();
+
+                if (this.state === STATE.HEALTHY) {
+                    const gradient = ctx.createRadialGradient(
+                        this.x, this.y, 0,
+                        this.x, this.y, this.radius
+                    );
+                    gradient.addColorStop(0, `hsl(${this.greenHue}, 70%, 35%)`);
+                    gradient.addColorStop(1, `hsl(${this.greenHue}, 60%, 20%)`);
+                    ctx.fillStyle = gradient;
+                    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                    ctx.fill();
+                } else if (this.state === STATE.BURNING) {
+                    const intensity = Math.sin(this.burnProgress * Math.PI);
+                    const flicker = 0.8 + Math.random() * 0.4;
+                    const glowRadius = this.radius * (1.5 + intensity * 1.5) * flicker;
+
+                    const glow = ctx.createRadialGradient(
+                        this.x, this.y, 0,
+                        this.x, this.y, glowRadius
+                    );
+                    const hue = 20 + (1 - this.burnProgress) * 30;
+                    glow.addColorStop(0, `hsla(${hue}, 100%, 70%, ${intensity * 0.9})`);
+                    glow.addColorStop(0.3, `hsla(${hue - 10}, 100%, 50%, ${intensity * 0.6})`);
+                    glow.addColorStop(0.6, `hsla(${hue - 20}, 100%, 30%, ${intensity * 0.3})`);
+                    glow.addColorStop(1, 'hsla(0, 100%, 20%, 0)');
+
+                    ctx.fillStyle = glow;
+                    ctx.arc(this.x, this.y, glowRadius, 0, Math.PI * 2);
+                    ctx.fill();
+
+                    ctx.beginPath();
+                    const coreGradient = ctx.createRadialGradient(
+                        this.x, this.y, 0,
+                        this.x, this.y, this.radius
+                    );
+                    const coreBrightness = 50 + intensity * 40;
+                    coreGradient.addColorStop(0, `hsl(50, 100%, ${coreBrightness}%)`);
+                    coreGradient.addColorStop(0.5, `hsl(30, 100%, ${coreBrightness - 20}%)`);
+                    coreGradient.addColorStop(1, `hsl(10, 100%, ${coreBrightness - 30}%)`);
+                    ctx.fillStyle = coreGradient;
+                    ctx.arc(this.x, this.y, this.radius * (1 - this.burnProgress * 0.3), 0, Math.PI * 2);
+                    ctx.fill();
+                } else {
+                    ctx.fillStyle = `hsl(0, 0%, ${10 + Math.random() * 5}%)`;
+                    ctx.arc(this.x, this.y, this.radius * 0.6, 0, Math.PI * 2);
+                    ctx.fill();
+                }
+            }
+        }
+
+        class Particle {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type;
+                this.life = 1;
+                this.decay = (0.01 + Math.random() * 0.02) * SPEED;
+
+                if (type === 'smoke') {
+                    this.vx = (Math.random() - 0.5) * 0.5 + WIND.x * 0.3;
+                    this.vy = -1 - Math.random() * 0.5 + WIND.y * 0.3;
+                    this.size = 3 + Math.random() * 4;
+                    this.color = { h: 30, s: 20, l: 30 };
+                } else {
+                    this.vx = (Math.random() - 0.5) * 2 + WIND.x;
+                    this.vy = -2 - Math.random() * 2 + WIND.y;
+                    this.size = 1 + Math.random() * 2;
+                    this.color = { h: 30 + Math.random() * 20, s: 100, l: 60 };
+                }
+            }
+
+            update(dt) {
+                this.x += this.vx * SPEED;
+                this.y += this.vy * SPEED;
+                this.life -= this.decay;
+
+                if (this.type === 'smoke') {
+                    this.size += 0.1 * SPEED;
+                    this.vx += WIND.x * 0.01;
+                    this.vy += WIND.y * 0.01;
+                } else {
+                    this.vy += 0.05 * SPEED;
+                    this.color.l = Math.max(30, this.color.l - 0.5);
+                }
+            }
+
+            draw() {
+                if (this.life <= 0) return;
+
+                ctx.beginPath();
+                if (this.type === 'smoke') {
+                    ctx.fillStyle = `hsla(${this.color.h}, ${this.color.s}%, ${this.color.l}%, ${this.life * 0.3})`;
+                } else {
+                    ctx.fillStyle = `hsla(${this.color.h}, ${this.color.s}%, ${this.color.l}%, ${this.life})`;
+                    ctx.shadowColor = `hsl(${this.color.h}, 100%, 50%)`;
+                    ctx.shadowBlur = 5;
+                }
+                ctx.arc(this.x, this.y, this.size * this.life, 0, Math.PI * 2);
+                ctx.fill();
+                ctx.shadowBlur = 0;
+            }
+        }
+
+        function init(time) {
+            trees = [];
+            particles = [];
+
+            for (let y = TREE_SPACING; y < H - TREE_SPACING / 2; y += TREE_SPACING) {
+                for (let x = TREE_SPACING; x < W - TREE_SPACING / 2; x += TREE_SPACING) {
+                    const offsetX = (Math.random() - 0.5) * 4;
+                    const offsetY = (Math.random() - 0.5) * 4;
+                    trees.push(new Tree(x + offsetX, y + offsetY));
+                }
+            }
+
+            const centerX = W / 2;
+            const centerY = H / 2;
+            trees.forEach(tree => {
+                const dx = tree.x - centerX;
+                const dy = tree.y - centerY;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 20) {
+                    tree.ignite(time);
+                }
+            });
+        }
+
+        function getNeighbors(tree) {
+            return trees.filter(t => {
+                if (t === tree || t.state !== STATE.HEALTHY) return false;
+                const dx = t.x - tree.x;
+                const dy = t.y - tree.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                return dist < TREE_SPACING * 2;
+            });
+        }
+
+        function spreadFire(time) {
+            const burningTrees = trees.filter(t => t.state === STATE.BURNING);
+
+            burningTrees.forEach(tree => {
+                const neighbors = getNeighbors(tree);
+                neighbors.forEach(neighbor => {
+                    const dx = neighbor.x - tree.x;
+                    const dy = neighbor.y - tree.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    const normDx = dx / dist;
+                    const normDy = dy / dist;
+                    const windAlignment = normDx * WIND.x + normDy * WIND.y;
+
+                    const windBonus = Math.max(0, windAlignment) * 0.15;
+                    const distanceFactor = 1 - (dist / (TREE_SPACING * 2));
+                    const spreadProb = (SPREAD_CHANCE + windBonus) * distanceFactor * SPEED;
+
+                    if (Math.random() < spreadProb) {
+                        neighbor.ignite(time);
+                    }
+                });
+            });
+        }
+
+        function update(time) {
+            if (startTime === null) {
+                startTime = time;
+                init(time);
+            }
+
+            const elapsed = (time - startTime) % LOOP;
+
+            if (elapsed < 50 && time - startTime > LOOP / 2) {
+                startTime = time;
+                init(time);
+            }
+
+            const dt = 16;
+            trees.forEach(tree => tree.update(time, dt));
+            spreadFire(time);
+
+            particles.forEach(p => p.update(dt));
+            particles = particles.filter(p => p.life > 0);
+        }
+
+        function draw() {
+            ctx.fillStyle = '#1a1208';
+            ctx.fillRect(0, 0, W, H);
+
+            const groundGradient = ctx.createLinearGradient(0, 0, 0, H);
+            groundGradient.addColorStop(0, '#1a1510');
+            groundGradient.addColorStop(1, '#0d0a05');
+            ctx.fillStyle = groundGradient;
+            ctx.fillRect(0, 0, W, H);
+
+            trees.filter(t => t.state === STATE.BURNT).forEach(t => t.draw());
+            trees.filter(t => t.state === STATE.HEALTHY).forEach(t => t.draw());
+            trees.filter(t => t.state === STATE.BURNING).forEach(t => t.draw());
+
+            particles.filter(p => p.type === 'smoke').forEach(p => p.draw());
+            particles.filter(p => p.type === 'ember').forEach(p => p.draw());
+
+            const burningCount = trees.filter(t => t.state === STATE.BURNING).length;
+            if (burningCount > 0) {
+                ctx.globalCompositeOperation = 'lighter';
+                trees.filter(t => t.state === STATE.BURNING).forEach(tree => {
+                    const gradient = ctx.createRadialGradient(
+                        tree.x, tree.y, 0,
+                        tree.x, tree.y, 30
+                    );
+                    gradient.addColorStop(0, 'rgba(255, 150, 50, 0.1)');
+                    gradient.addColorStop(1, 'rgba(255, 100, 0, 0)');
+                    ctx.fillStyle = gradient;
+                    ctx.fillRect(tree.x - 30, tree.y - 30, 60, 60);
+                });
+                ctx.globalCompositeOperation = 'source-over';
+            }
+
+            ctx.fillStyle = 'rgba(200, 180, 150, 0.4)';
+            ctx.font = '9px monospace';
+            const windDir = Math.atan2(WIND.y, WIND.x) * 180 / Math.PI;
+            ctx.fillText(`Wind: ${windDir.toFixed(0)}deg`, 5, H - 5);
+        }
+
+        function animate(time) {
+            update(time);
+            draw();
+            requestAnimationFrame(animate);
+        }
+
+        requestAnimationFrame(animate);
+    </script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-16_wildfire_simulation/claude.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-16_wildfire_simulation/claude.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

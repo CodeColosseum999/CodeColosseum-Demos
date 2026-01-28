@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Forest Fire Simulation</title>
+    <style>
+        body, html {
+            margin: 0;
+            padding: 0;
+            width: 100%;
+            height: 100%;
+            overflow: hidden;
+            background-color: #050505;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+            image-rendering: pixelated; /* Optional: for a retro feel, or remove for smooth */
+        }
+    </style>
+</head>
+<body>
+    <canvas id="simCanvas"></canvas>
+    <script>
+        // Parse Query Parameters
+        const params = new URLSearchParams(window.location.search);
+        const W = parseInt(params.get('w')) || 416;
+        const H = parseInt(params.get('h')) || 416;
+        const LOOP_MS = parseInt(params.get('loop')) || 10000;
+        const SPEED = parseFloat(params.get('speed')) || 1.0;
+
+        // Setup Canvas
+        const canvas = document.getElementById('simCanvas');
+        const ctx = canvas.getContext('2d', { alpha: false }); // Optimize for no transparency
+        
+        // Set internal resolution
+        canvas.width = W;
+        canvas.height = H;
+
+        // Simulation Constants
+        const TREE_RADIUS = 2.5; // Slightly smaller for density
+        const GAP = 1;
+        const SPACING = (TREE_RADIUS * 2) + GAP;
+        const COLS = Math.floor(W / SPACING);
+        const ROWS = Math.floor(H / SPACING);
+        
+        // Tree States
+        const ALIVE = 0;
+        const BURNING = 1;
+        const BURNT = 2;
+
+        // Simulation State
+        let trees = [];
+        let particles = [];
+        let simulationTime = 0;
+        let lastFrameTime = 0;
+
+        // Tree Class-ish structure (using flat objects for performance)
+        function initGrid() {
+            trees = new Array(COLS * ROWS);
+            for (let y = 0; y < ROWS; y++) {
+                for (let x = 0; x < COLS; x++) {
+                    trees[y * COLS + x] = {
+                        x: x * SPACING + SPACING / 2 + (Math.random() - 0.5), // Slight jitter
+                        y: y * SPACING + SPACING / 2 + (Math.random() - 0.5),
+                        gridX: x,
+                        gridY: y,
+                        state: ALIVE,
+                        burnTimer: 0,
+                        maxBurnTime: 800 + Math.random() * 400 // ms
+                    };
+                }
+            }
+        }
+
+        function startFire() {
+            // Start in the center
+            const cx = Math.floor(COLS / 2);
+            const cy = Math.floor(ROWS / 2);
+            // Ignite a cluster
+            for(let dy = -2; dy <= 2; dy++) {
+                for(let dx = -2; dx <= 2; dx++) {
+                    if (Math.random() > 0.3) ignite(cx + dx, cy + dy);
+                }
+            }
+            // Random spots
+            for(let i=0; i<3; i++) {
+                ignite(Math.floor(Math.random() * COLS), Math.floor(Math.random() * ROWS));
+            }
+        }
+
+        function ignite(gx, gy) {
+            if (gx >= 0 && gx < COLS && gy >= 0 && gy < ROWS) {
+                const idx = gy * COLS + gx;
+                if (trees[idx].state === ALIVE) {
+                    trees[idx].state = BURNING;
+                }
+            }
+        }
+
+        // Particle System
+        function spawnEmber(x, y) {
+            particles.push({
+                x: x,
+                y: y,
+                vx: (Math.random() * 2 + 1) * 0.5, // Wind blows right
+                vy: -(Math.random() * 1.5 + 0.5), // Heat rises
+                life: 1.0,
+                decay: 0.01 + Math.random() * 0.02,
+                color: Math.random() > 0.5 ? '#ffff00' : '#ff4500',
+                size: Math.random() * 1.5
+            });
+        }
+
+        function update(dt) {
+            // Wind parameters
+            const windX = 1.0; 
+            const spreadChanceBase = 0.08 * (dt / 16); // Normalize to ~60fps
+
+            // We iterate backwards or use a temp buffer to avoid immediate propagation cascade in one frame?
+            // Actually, for fire, immediate propagation in one frame is okay visually, but directional bias matters.
+            // Let's iterate and collect new ignitions to apply after.
+            const newIgnitions = [];
+
+            for (let i = 0; i < trees.length; i++) {
+                const t = trees[i];
+                if (t.state === BURNING) {
+                    t.burnTimer += dt;
+                    
+                    // Spawn particles occasionally
+                    if (Math.random() < 0.1 * (dt/16)) {
+                        spawnEmber(t.x, t.y);
+                    }
+
+                    // Spread fire
+                    // Neighbor offsets: [dx, dy, bias]
+                    // Wind is blowing Right (+x).
+                    const neighbors = [
+                        [ 1,  0, 2.5], // Right (Downwind) - High chance
+                        [-1,  0, 0.2], // Left (Upwind) - Low chance
+                        [ 0,  1, 1.0], // Down
+                        [ 0, -1, 1.0], // Up
+                        [ 1, -1, 1.8], // Top-Right
+                        [ 1,  1, 1.8], // Bottom-Right
+                        [-1, -1, 0.3], // Top-Left
+                        [-1,  1, 0.3]  // Bottom-Left
+                    ];
+
+                    // Optimization: Only try to spread periodically or based on burn intensity
+                    if (Math.random() < 0.2) { 
+                        for (let n of neighbors) {
+                            const nx = t.gridX + n[0];
+                            const ny = t.gridY + n[1];
+                            const bias = n[2];
+                            
+                            if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) {
+                                const nIdx = ny * COLS + nx;
+                                if (trees[nIdx].state === ALIVE) {
+                                    if (Math.random() < spreadChanceBase * bias) {
+                                        newIgnitions.push(nIdx);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if (t.burnTimer >= t.maxBurnTime) {
+                        t.state = BURNT;
+                    }
+                }
+            }
+
+            // Apply ignitions
+            for (let idx of newIgnitions) {
+                trees[idx].state = BURNING;
+            }
+
+            // Update particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.x += p.vx * (dt / 16);
+                p.y += p.vy * (dt / 16);
+                p.life -= p.decay * (dt / 16);
+                
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        function draw() {
+            // Background
+            ctx.fillStyle = '#0f0f0f';
+            ctx.fillRect(0, 0, W, H);
+
+            // Draw Trees
+            for (let i = 0; i < trees.length; i++) {
+                const t = trees[i];
+                if (t.state === ALIVE) {
+                    ctx.fillStyle = '#1e3f20'; // Dark Green
+                    ctx.beginPath();
+                    ctx.arc(t.x, t.y, TREE_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                } else if (t.state === BURNING) {
+                    // Burning Glow
+                    ctx.shadowBlur = 10;
+                    ctx.shadowColor = '#ff5500';
+                    ctx.fillStyle = `hsl(${10 + Math.random() * 40}, 100%, 50%)`; // Flicker orange/yellow
+                    ctx.beginPath();
+                    ctx.arc(t.x, t.y, TREE_RADIUS + 0.5, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.shadowBlur = 0; // Reset
+                } else if (t.state === BURNT) {
+                    ctx.fillStyle = '#050505'; // Almost black
+                    ctx.strokeStyle = '#222';
+                    ctx.beginPath();
+                    ctx.arc(t.x, t.y, TREE_RADIUS, 0, Math.PI * 2);
+                    ctx.fill();
+                    ctx.stroke();
+                }
+            }
+
+            // Draw Particles
+            ctx.globalCompositeOperation = 'screen'; // Make particles glow/add up
+            for (let p of particles) {
+                ctx.fillStyle = p.color;
+                ctx.globalAlpha = p.life;
+                ctx.beginPath();
+                ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+                ctx.fill();
+            }
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.globalAlpha = 1.0;
+        }
+
+        function loop(timestamp) {
+            if (!lastFrameTime) lastFrameTime = timestamp;
+            const elapsed = timestamp - lastFrameTime;
+            lastFrameTime = timestamp;
+
+            const dt = elapsed * SPEED;
+            simulationTime += dt;
+
+            // Loop reset logic
+            if (simulationTime > LOOP_MS) {
+                initGrid();
+                startFire();
+                particles = [];
+                simulationTime = 0;
+            }
+
+            update(dt);
+            draw();
+
+            requestAnimationFrame(loop);
+        }
+
+        // Initialize
+        initGrid();
+        startFire();
+        requestAnimationFrame(loop);
+
+    </script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-16_wildfire_simulation/gemini.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-16_wildfire_simulation/gemini.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

@@ -1,0 +1,570 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, height=device-height, initial-scale=1, maximum-scale=1, user-scalable=no">
+    <title>Forest Fire</title>
+    <style>
+        :root {
+            color-scheme: dark;
+        }
+        html, body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            background: #05070b;
+            overflow: hidden;
+        }
+        canvas {
+            width: 100vw;
+            height: 100vh;
+            display: block;
+            background: radial-gradient(120% 120% at 50% 40%, #0b1320 0%, #05070b 45%, #020308 100%);
+        }
+        .vignette {
+            position: fixed;
+            inset: 0;
+            pointer-events: none;
+            background:
+                radial-gradient(120% 120% at 50% 45%, rgba(0,0,0,0) 35%, rgba(0,0,0,0.55) 78%, rgba(0,0,0,0.85) 100%);
+            mix-blend-mode: multiply;
+        }
+    </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="vignette"></div>
+<script>
+(() => {
+    "use strict";
+
+    const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+    const lerp = (a, b, t) => a + (b - a) * t;
+    const smoothstep = (e0, e1, x) => {
+        const t = clamp((x - e0) / (e1 - e0), 0, 1);
+        return t * t * (3 - 2 * t);
+    };
+    const hash32 = (x) => {
+        x |= 0;
+        x ^= x >>> 16;
+        x = Math.imul(x, 0x7feb352d);
+        x ^= x >>> 15;
+        x = Math.imul(x, 0x846ca68b);
+        x ^= x >>> 16;
+        return x >>> 0;
+    };
+    const rand01 = (seed) => hash32(seed) / 4294967296;
+
+    const qs = new URLSearchParams(location.search);
+    const W = clamp((+qs.get("w") || 416) | 0, 160, 1400);
+    const H = clamp((+qs.get("h") || 416) | 0, 160, 1400);
+    const LOOP_MS = clamp((+qs.get("loop") || 10000) | 0, 2000, 60000);
+    const SPEED = clamp(parseFloat(qs.get("speed") || "1") || 1, 0.05, 4);
+
+    const canvas = document.getElementById("c");
+    const ctx = canvas.getContext("2d", { alpha: false, desynchronized: true });
+
+    const FPS = 60;
+    const frames = Math.max(180, Math.round(LOOP_MS / (1000 / FPS)));
+    const dt_ms = LOOP_MS / frames;
+
+    const minWH = Math.min(W, H);
+    const spacing = Math.max(7.2, 8.0 * (minWH / 416));
+    const cols = clamp(Math.floor(W / spacing), 40, 86);
+    const rows = clamp(Math.floor(H / spacing), 40, 86);
+    const cell_w = W / cols;
+    const cell_h = H / rows;
+    const cell_s = Math.min(cell_w, cell_h);
+    const n_cells = cols * rows;
+
+    const pos_x = new Float32Array(n_cells);
+    const pos_y = new Float32Array(n_cells);
+    const base_r = new Float32Array(n_cells);
+    const base_g = new Float32Array(n_cells);
+    const base_b = new Float32Array(n_cells);
+    const radius = new Float32Array(n_cells);
+    const center_heat = new Float32Array(n_cells);
+
+    const cx = W * 0.5;
+    const cy = H * 0.5;
+    const sigma = minWH * 0.16;
+    const sigma2 = sigma * sigma;
+
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = y * cols + x;
+            const seed = hash32(i ^ 0x9e3779b9);
+            const jx = (rand01(seed) - 0.5) * cell_s * 0.62;
+            const jy = (rand01(seed ^ 0x85ebca6b) - 0.5) * cell_s * 0.62;
+            const px = (x + 0.5) * cell_w + jx;
+            const py = (y + 0.5) * cell_h + jy;
+            pos_x[i] = px;
+            pos_y[i] = py;
+
+            const gr = rand01(seed ^ 0x27d4eb2d);
+            const hue_shift = (gr - 0.5) * 0.18;
+            const g0 = 110 + hue_shift * 60;
+            const s0 = 0.52 + (rand01(seed ^ 0x165667b1) - 0.5) * 0.16;
+            const l0 = 0.26 + (rand01(seed ^ 0xd3a2646c) - 0.5) * 0.10;
+            const a = s0 * Math.min(l0, 1 - l0);
+            const f = (n) => {
+                const k = (n + g0 / 30) % 12;
+                const c = l0 - a * Math.max(-1, Math.min(Math.min(k - 3, 9 - k), 1));
+                return clamp(c, 0, 1);
+            };
+            base_r[i] = Math.round(f(0) * 255);
+            base_g[i] = Math.round(f(8) * 255);
+            base_b[i] = Math.round(f(4) * 255);
+            radius[i] = cell_s * (0.22 + 0.10 * rand01(seed ^ 0x1b873593));
+
+            const dx = px - cx;
+            const dy = py - cy;
+            center_heat[i] = Math.exp(-(dx * dx + dy * dy) / (2 * sigma2));
+        }
+    }
+
+    const MAX_N = 8;
+    const n_idx = new Int32Array(n_cells * MAX_N);
+    const n_dx = new Float32Array(n_cells * MAX_N);
+    const n_dy = new Float32Array(n_cells * MAX_N);
+    const n_w = new Float32Array(n_cells * MAX_N);
+    const n_ct = new Uint8Array(n_cells);
+
+    for (let y = 0; y < rows; y++) {
+        for (let x = 0; x < cols; x++) {
+            const i = y * cols + x;
+            let k = 0;
+            for (let oy = -1; oy <= 1; oy++) {
+                for (let ox = -1; ox <= 1; ox++) {
+                    if (ox === 0 && oy === 0) continue;
+                    const xx = x + ox;
+                    const yy = y + oy;
+                    if (xx < 0 || xx >= cols || yy < 0 || yy >= rows) continue;
+                    const j = yy * cols + xx;
+                    const off = i * MAX_N + k;
+                    n_idx[off] = j;
+                    const dx = pos_x[i] - pos_x[j];
+                    const dy = pos_y[i] - pos_y[j];
+                    const d = Math.hypot(dx, dy) || 1;
+                    n_dx[off] = dx / d;
+                    n_dy[off] = dy / d;
+                    n_w[off] = (ox === 0 || oy === 0) ? 1.0 : 0.78;
+                    k++;
+                }
+            }
+            n_ct[i] = k;
+        }
+    }
+
+    const burn_dur = new Float32Array(n_cells);
+    const ash_dur = new Float32Array(n_cells);
+    const state = new Uint8Array(n_cells); // 0 healthy, 1 burning, 2 ash
+    const timer = new Float32Array(n_cells);
+    const intens = new Float32Array(n_cells);
+
+    const base_burn = 1150;
+    const base_ash = 3300;
+    for (let i = 0; i < n_cells; i++) {
+        const s = hash32(i ^ 0xa0761d65);
+        burn_dur[i] = base_burn * (0.78 + 0.55 * rand01(s));
+        ash_dur[i] = base_ash * (0.72 + 0.62 * rand01(s ^ 0xe7037ed1));
+        timer[i] = 0;
+        state[i] = 0;
+    }
+
+    const seed_radius = minWH * 0.055;
+    for (let i = 0; i < n_cells; i++) {
+        const dx = pos_x[i] - cx;
+        const dy = pos_y[i] - cy;
+        if (dx * dx + dy * dy < seed_radius * seed_radius) {
+            state[i] = 1;
+            timer[i] = burn_dur[i] * (0.05 + 0.25 * rand01(i ^ 0x632be59b));
+        }
+    }
+    for (let s = 0; s < 5; s++) {
+        const i = Math.floor(rand01(s ^ 0x9e3779b9) * n_cells);
+        state[i] = 1;
+        timer[i] = burn_dur[i] * (0.05 + 0.25 * rand01(i ^ 0x27d4eb2d));
+    }
+
+    const stored_frames = frames * 2;
+    const burn_frames = new Uint8Array(stored_frames * n_cells);
+    const ash_frames = new Uint8Array(stored_frames * n_cells);
+
+    const wind_base_x = 1.0;
+    const wind_base_y = 0.06;
+    const wind_len = Math.hypot(wind_base_x, wind_base_y) || 1;
+    const wind_x0 = wind_base_x / wind_len;
+    const wind_y0 = wind_base_y / wind_len;
+
+    const fire_curve = (p) => {
+        const t = clamp(p, 0, 1);
+        const s = Math.sin(Math.PI * t);
+        return Math.pow(Math.max(0, s), 0.65);
+    };
+
+    const ignite_k = 2.45;
+    const center_boost = 3.1;
+    const wind_strength = 2.05;
+    const lightning_rate = 0.000075; // per ms
+
+    const step_sim = (tick) => {
+        const t = tick * dt_ms;
+        const wigg = 0.35 * Math.sin(t * 0.0013) + 0.22 * Math.sin(t * 0.0021 + 1.8);
+        const wx = wind_x0;
+        const wy = wind_y0 + 0.14 * wigg;
+        const wl = Math.hypot(wx, wy) || 1;
+        const wind_x = wx / wl;
+        const wind_y = wy / wl;
+
+        for (let i = 0; i < n_cells; i++) {
+            if (state[i] === 1) {
+                timer[i] += dt_ms;
+                if (timer[i] >= burn_dur[i]) {
+                    state[i] = 2;
+                    timer[i] = 0;
+                    intens[i] = 0;
+                } else {
+                    intens[i] = fire_curve(timer[i] / burn_dur[i]);
+                }
+            } else {
+                intens[i] = 0;
+            }
+            if (state[i] === 2) {
+                timer[i] += dt_ms;
+                if (timer[i] >= ash_dur[i]) {
+                    state[i] = 0;
+                    timer[i] = 0;
+                }
+            }
+        }
+
+        for (let i = 0; i < n_cells; i++) {
+            if (state[i] !== 0) continue;
+
+            let heat = center_boost * center_heat[i];
+            const count = n_ct[i];
+            const base_off = i * MAX_N;
+
+            for (let k = 0; k < count; k++) {
+                const off = base_off + k;
+                const j = n_idx[off];
+                const b = intens[j];
+                if (b <= 0) continue;
+                const dot = n_dx[off] * wind_x + n_dy[off] * wind_y;
+                const wdir = 1 + wind_strength * Math.pow(Math.max(0, dot), 2);
+                heat += b * n_w[off] * wdir;
+            }
+
+            const s = hash32(i ^ (tick * 374761393) ^ 0x68bc21eb);
+            const lightning = rand01(s) < (dt_ms * lightning_rate);
+            const p = clamp(heat * ignite_k * (dt_ms / 1000) + (lightning ? 0.85 : 0), 0, 0.92);
+            if (rand01(s ^ 0x3c6ef372) < p) {
+                state[i] = 1;
+                timer[i] = Math.min(burn_dur[i] * 0.11, 140);
+                intens[i] = fire_curve(timer[i] / burn_dur[i]);
+            }
+        }
+    };
+
+    const warmup = frames;
+    for (let i = 0; i < warmup; i++) step_sim(i);
+    for (let f = 0; f < stored_frames; f++) {
+        step_sim(warmup + f);
+        const bo = f * n_cells;
+        for (let i = 0; i < n_cells; i++) {
+            let b = intens[i];
+            if (b > 0) {
+                const flick = 0.86 + 0.14 * Math.sin((warmup + f) * 0.31 + i * 0.017);
+                b = clamp(b * flick, 0, 1);
+            }
+            const burn_u8 = (b * 255) | 0;
+            let ash = 0;
+            if (state[i] === 2) {
+                const p = clamp(timer[i] / ash_dur[i], 0, 1);
+                ash = Math.pow(1 - p, 1.05);
+            } else if (state[i] === 1) {
+                const p = clamp(timer[i] / burn_dur[i], 0, 1);
+                ash = Math.pow(p, 0.9) * 0.55;
+            }
+            burn_frames[bo + i] = burn_u8;
+            ash_frames[bo + i] = (clamp(ash, 0, 1) * 255) | 0;
+        }
+    }
+
+    const makeSprite = (size, draw) => {
+        const c = document.createElement("canvas");
+        c.width = c.height = size;
+        const g = c.getContext("2d");
+        draw(g, size);
+        return c;
+    };
+
+    const sprite_fire = makeSprite(128, (g, s) => {
+        const r = s * 0.48;
+        const cx = s * 0.5;
+        const cy = s * 0.52;
+        const grd = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+        grd.addColorStop(0.00, "rgba(255,255,255,0.95)");
+        grd.addColorStop(0.12, "rgba(255,240,180,0.90)");
+        grd.addColorStop(0.28, "rgba(255,170,60,0.65)");
+        grd.addColorStop(0.48, "rgba(255,90,20,0.25)");
+        grd.addColorStop(0.70, "rgba(120,25,10,0.08)");
+        grd.addColorStop(1.00, "rgba(0,0,0,0)");
+        g.fillStyle = grd;
+        g.beginPath();
+        g.arc(cx, cy, r, 0, Math.PI * 2);
+        g.fill();
+
+        g.globalCompositeOperation = "overlay";
+        for (let i = 0; i < 1100; i++) {
+            const a = i * 12.9898;
+            const x = cx + (Math.sin(a) * 0.5 + Math.sin(a * 0.37) * 0.5) * r * 0.9;
+            const y = cy + (Math.cos(a * 0.91) * 0.5 + Math.cos(a * 0.23) * 0.5) * r * 0.9;
+            const rr = (0.4 + (i % 17) / 17) * 2.2;
+            g.fillStyle = `rgba(255,${160 + (i % 90)},${30 + (i % 35)},${0.02 + (i % 13) * 0.002})`;
+            g.beginPath();
+            g.arc(x, y, rr, 0, Math.PI * 2);
+            g.fill();
+        }
+        g.globalCompositeOperation = "source-over";
+    });
+
+    const sprite_smoke = makeSprite(128, (g, s) => {
+        const r = s * 0.50;
+        const cx = s * 0.5;
+        const cy = s * 0.5;
+        const grd = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+        grd.addColorStop(0.00, "rgba(210,220,235,0.18)");
+        grd.addColorStop(0.28, "rgba(160,175,200,0.10)");
+        grd.addColorStop(0.55, "rgba(90,110,140,0.05)");
+        grd.addColorStop(1.00, "rgba(0,0,0,0)");
+        g.fillStyle = grd;
+        g.beginPath();
+        g.arc(cx, cy, r, 0, Math.PI * 2);
+        g.fill();
+    });
+
+    const sprite_ember = makeSprite(64, (g, s) => {
+        const cx = s * 0.5;
+        const cy = s * 0.5;
+        const r = s * 0.18;
+        const grd = g.createRadialGradient(cx, cy, 0, cx, cy, r);
+        grd.addColorStop(0.0, "rgba(255,255,240,0.95)");
+        grd.addColorStop(0.4, "rgba(255,200,70,0.55)");
+        grd.addColorStop(1.0, "rgba(255,90,20,0)");
+        g.fillStyle = grd;
+        g.beginPath();
+        g.arc(cx, cy, r, 0, Math.PI * 2);
+        g.fill();
+    });
+
+    const bg = makeSprite(512, (g, s) => {
+        g.fillStyle = "#05070b";
+        g.fillRect(0, 0, s, s);
+
+        const grd = g.createLinearGradient(0, 0, 0, s);
+        grd.addColorStop(0, "rgba(18,30,42,0.55)");
+        grd.addColorStop(0.55, "rgba(7,12,18,0.72)");
+        grd.addColorStop(1, "rgba(2,3,8,1)");
+        g.fillStyle = grd;
+        g.fillRect(0, 0, s, s);
+
+        g.globalCompositeOperation = "overlay";
+        for (let i = 0; i < 9000; i++) {
+            const h = hash32(i * 2654435761);
+            const x = (h & 1023) / 1023 * s;
+            const y = ((h >>> 10) & 1023) / 1023 * s;
+            const a = 0.02 + ((h >>> 20) & 255) / 255 * 0.08;
+            const c = 60 + ((h >>> 28) & 15) * 6;
+            g.fillStyle = `rgba(${c},${c + 10},${c + 18},${a})`;
+            g.fillRect(x, y, 1, 1);
+        }
+        g.globalCompositeOperation = "source-over";
+    });
+
+    const N_PART = 950;
+    const part_home = new Uint16Array(N_PART);
+    const part_phase = new Uint16Array(N_PART);
+    const part_life = new Uint16Array(N_PART);
+    const part_kind = new Uint8Array(N_PART);
+    const part_spin = new Float32Array(N_PART);
+
+    for (let i = 0; i < N_PART; i++) {
+        const s = hash32(i ^ 0x243f6a88);
+        part_home[i] = Math.floor(rand01(s) * n_cells);
+        part_phase[i] = Math.floor(rand01(s ^ 0xb7e15162) * frames);
+        part_life[i] = Math.floor(44 + rand01(s ^ 0x9e3779b9) * 88);
+        part_kind[i] = rand01(s ^ 0x85ebca6b) < 0.75 ? 0 : 1; // 0 smoke, 1 ember
+        part_spin[i] = (rand01(s ^ 0xc2b2ae35) - 0.5) * 2.2;
+    }
+
+    const resize = () => {
+        const dpr = Math.max(1, Math.min(2.25, devicePixelRatio || 1));
+        const cw = Math.floor(innerWidth * dpr);
+        const ch = Math.floor(innerHeight * dpr);
+        if (canvas.width !== cw || canvas.height !== ch) {
+            canvas.width = cw;
+            canvas.height = ch;
+        }
+    };
+    addEventListener("resize", resize, { passive: true });
+    resize();
+
+    const draw = (now_ms) => {
+        const t = now_ms * SPEED;
+        const phase_ms = ((t % LOOP_MS) + LOOP_MS) % LOOP_MS;
+        const p = phase_ms / LOOP_MS;
+
+        const frame_pos = phase_ms / dt_ms;
+        const f0 = clamp(Math.floor(frame_pos), 0, frames - 1);
+        const f1 = clamp(f0 + 1, 0, frames - 1);
+        const frac = frame_pos - f0;
+
+        const mix = smoothstep(0, 1, p);
+        const bo0 = f0 * n_cells;
+        const bo1 = f1 * n_cells;
+        const ao0 = (frames + f0) * n_cells;
+        const ao1 = (frames + f1) * n_cells;
+
+        const cw = canvas.width;
+        const ch = canvas.height;
+        const scale = Math.max(cw / W, ch / H);
+        const ox = (cw - W * scale) * 0.5;
+        const oy = (ch - H * scale) * 0.5;
+        ctx.setTransform(scale, 0, 0, scale, ox, oy);
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.globalCompositeOperation = "source-over";
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = "#05070b";
+        ctx.fillRect(0, 0, W, H);
+
+        const bg_shift_x = (Math.sin(t * 0.0002) * 0.5 + 0.5) * 18;
+        const bg_shift_y = (Math.cos(t * 0.00017) * 0.5 + 0.5) * 22;
+        ctx.globalAlpha = 0.92;
+        ctx.drawImage(bg, -bg_shift_x, -bg_shift_y, W + bg_shift_x * 2, H + bg_shift_y * 2);
+        ctx.globalAlpha = 1;
+
+        const gx = 1.0;
+        const gy = 0.12 * Math.sin(t * 0.00095) + 0.05;
+        const gl = Math.hypot(gx, gy) || 1;
+        const wind_x = gx / gl;
+        const wind_y = gy / gl;
+
+        const ash_r = 20, ash_g = 18, ash_b = 16;
+        const fire_light_r = 210, fire_light_g = 68, fire_light_b = 12;
+
+        const time_wob = 0.6 + 0.4 * Math.sin(t * 0.0013);
+        const ember_bias = 0.55 + 0.45 * Math.sin(t * 0.0018 + 1.2);
+
+        ctx.globalCompositeOperation = "source-over";
+        for (let i = 0; i < n_cells; i++) {
+            const burn_a = lerp(burn_frames[ao0 + i], burn_frames[ao1 + i], frac) / 255;
+            const burn_b = lerp(burn_frames[bo0 + i], burn_frames[bo1 + i], frac) / 255;
+            const ash_a = lerp(ash_frames[ao0 + i], ash_frames[ao1 + i], frac) / 255;
+            const ash_b = lerp(ash_frames[bo0 + i], ash_frames[bo1 + i], frac) / 255;
+
+            const burn = lerp(burn_a, burn_b, mix);
+            const ash = lerp(ash_a, ash_b, mix);
+
+            const b = clamp(burn * (0.92 + 0.10 * time_wob), 0, 1);
+            const a = clamp(ash * (0.90 + 0.10 * (1 - time_wob)), 0, 1);
+
+            const r0 = base_r[i], g0 = base_g[i], b0 = base_b[i];
+            const darken = 0.30 + 0.70 * (1 - a);
+            let r = lerp(ash_r, r0, darken);
+            let g = lerp(ash_g, g0, darken);
+            let bb = lerp(ash_b, b0, darken);
+
+            r += b * fire_light_r;
+            g += b * fire_light_g;
+            bb += b * fire_light_b;
+
+            const rr = clamp(r, 0, 255) | 0;
+            const gg = clamp(g, 0, 255) | 0;
+            const bbb = clamp(bb, 0, 255) | 0;
+
+            ctx.fillStyle = `rgb(${rr},${gg},${bbb})`;
+            ctx.beginPath();
+            ctx.arc(pos_x[i], pos_y[i], radius[i], 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        ctx.globalCompositeOperation = "lighter";
+        for (let i = 0; i < n_cells; i++) {
+            const burn_a = lerp(burn_frames[ao0 + i], burn_frames[ao1 + i], frac) / 255;
+            const burn_b = lerp(burn_frames[bo0 + i], burn_frames[bo1 + i], frac) / 255;
+            let burn = lerp(burn_a, burn_b, mix);
+            if (burn < 0.06) continue;
+
+            const n = Math.sin(t * 0.006 + i * 0.13) * 0.5 + Math.sin(t * 0.0031 + i * 0.07) * 0.5;
+            burn = clamp(burn * (0.88 + 0.16 * n), 0, 1);
+            const s = (radius[i] * (5.4 + 6.2 * burn));
+
+            ctx.globalAlpha = 0.16 + burn * 0.95;
+            ctx.drawImage(sprite_fire, pos_x[i] - s * 0.5, pos_y[i] - s * 0.6, s, s);
+
+            if (burn > 0.22 && rand01((i * 1103515245) ^ ((f0 + 17) * 12345)) < 0.06) {
+                const es = s * (0.16 + 0.22 * burn);
+                ctx.globalAlpha = 0.20 + burn * 0.35;
+                ctx.drawImage(sprite_ember, pos_x[i] - es * 0.5, pos_y[i] - es * 0.5, es, es);
+            }
+        }
+        ctx.globalAlpha = 1;
+
+        const frame_f = frame_pos;
+        ctx.globalCompositeOperation = "source-over";
+        for (let pidx = 0; pidx < N_PART; pidx++) {
+            const home = part_home[pidx];
+            const burn_a = lerp(burn_frames[ao0 + home], burn_frames[ao1 + home], frac) / 255;
+            const burn_b = lerp(burn_frames[bo0 + home], burn_frames[bo1 + home], frac) / 255;
+            const burn = lerp(burn_a, burn_b, mix);
+            if (burn < 0.10) continue;
+
+            const age = (frame_f - part_phase[pidx] + frames) % frames;
+            const life = part_life[pidx];
+            if (age >= life) continue;
+
+            const u = age / life;
+            const k = part_kind[pidx];
+            const sw = Math.sin((t * 0.0016) + pidx * 1.7) * part_spin[pidx];
+            const drift = (0.5 + 0.5 * Math.sin(pidx * 0.77 + t * 0.0012));
+
+            const rise = u * (1.0 + 0.35 * (1 - u));
+            const px = pos_x[home] + (wind_x * 28 * rise) + (sw * 10 * rise) + (drift - 0.5) * 6;
+            const py = pos_y[home] - (36 * rise + 18 * rise * rise) + (wind_y * 10 * rise);
+
+            const fade = Math.pow(1 - u, 2.0);
+            if (k === 0) {
+                const ss = (10 + 24 * rise) * (0.6 + 0.7 * burn);
+                ctx.globalAlpha = (0.04 + 0.22 * burn) * fade;
+                ctx.drawImage(sprite_smoke, px - ss * 0.5, py - ss * 0.5, ss, ss);
+            } else {
+                const ss = (2 + 6 * rise) * (0.7 + 0.8 * burn);
+                const jitter = (Math.sin(pidx * 12.3 + t * 0.009) * 0.5 + 0.5) * 6 * ember_bias;
+                ctx.globalCompositeOperation = "lighter";
+                ctx.globalAlpha = (0.10 + 0.32 * burn) * fade;
+                ctx.drawImage(sprite_ember, px - ss * 0.5 + jitter, py - ss * 0.5 - jitter * 0.4, ss, ss);
+                ctx.globalCompositeOperation = "source-over";
+            }
+        }
+        ctx.globalAlpha = 1;
+
+        requestAnimationFrame(draw);
+    };
+    requestAnimationFrame(draw);
+})();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-16_wildfire_simulation/gpt.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-16_wildfire_simulation/gpt.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

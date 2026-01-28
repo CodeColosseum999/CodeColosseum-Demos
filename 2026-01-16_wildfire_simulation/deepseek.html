@@ -1,0 +1,343 @@
+<!DOCTYPE html>                                                                                                                                               
+<html lang="en">                                                                                                                                              
+<head>                                                                                                                                                        
+    <meta charset="UTF-8">                                                                                                                                    
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">                                                                                    
+    <title>Forest Fire Simulation</title>                                                                                                                     
+    <style>                                                                                                                                                   
+        * {                                                                                                                                                   
+            margin: 0;                                                                                                                                        
+            padding: 0;                                                                                                                                       
+            box-sizing: border-box;                                                                                                                           
+        }                                                                                                                                                     
+        body {                                                                                                                                                
+            background: #000;                                                                                                                                 
+            display: flex;                                                                                                                                    
+            justify-content: center;                                                                                                                          
+            align-items: center;                                                                                                                              
+            min-height: 100vh;                                                                                                                                
+            overflow: hidden;                                                                                                                                 
+        }                                                                                                                                                     
+        canvas {                                                                                                                                              
+            display: block;                                                                                                                                   
+            background: #000;                                                                                                                                 
+        }                                                                                                                                                     
+    </style>                                                                                                                                                  
+</head>                                                                                                                                                       
+<body>                                                                                                                                                        
+    <canvas id="fireCanvas"></canvas>                                                                                                                         
+    <script>                                                                                                                                                  
+        // Get URL parameters                                                                                                                                 
+        const urlParams = new URLSearchParams(window.location.search);                                                                                        
+        const width = parseInt(urlParams.get('w')) || 416;                                                                                                    
+        const height = parseInt(urlParams.get('h')) || 416;                                                                                                   
+        const loopDuration = parseInt(urlParams.get('loop')) || 10000;                                                                                        
+        const speed = parseFloat(urlParams.get('speed')) || 1.0;                                                                                              
+                                                                                                                                                              
+        // Setup canvas                                                                                                                                       
+        const canvas = document.getElementById('fireCanvas');                                                                                                 
+        const ctx = canvas.getContext('2d');                                                                                                                  
+        canvas.width = width;                                                                                                                                 
+        canvas.height = height;                                                                                                                               
+                                                                                                                                                              
+        // Set canvas to fill screen                                                                                                                          
+        canvas.style.width = '100%';                                                                                                                          
+        canvas.style.height = '100%';                                                                                                                         
+        canvas.style.position = 'absolute';                                                                                                                   
+        canvas.style.top = '0';                                                                                                                               
+        canvas.style.left = '0';                                                                                                                              
+                                                                                                                                                              
+        // Simulation parameters                                                                                                                              
+        const gridSize = 18;                                                                                                                                  
+        const cols = Math.floor(width / gridSize);                                                                                                            
+        const rows = Math.floor(height / gridSize);                                                                                                           
+                                                                                                                                                              
+        // Tree states                                                                                                                                        
+        const STATE = {                                                                                                                                       
+            HEALTHY: 0,                                                                                                                                       
+            BURNING: 1,                                                                                                                                       
+            BURNT: 2                                                                                                                                          
+        };                                                                                                                                                    
+                                                                                                                                                              
+        // Wind vector (blowing to the right by default)                                                                                                      
+        let wind = { x: 2.0, y: 0.0 };                                                                                                                        
+                                                                                                                                                              
+        // Create grid of trees                                                                                                                               
+        let trees = [];                                                                                                                                       
+        for (let y = 0; y < rows; y++) {                                                                                                                      
+            for (let x = 0; x < cols; x++) {                                                                                                                  
+                trees.push({                                                                                                                                  
+                    x: x * gridSize + gridSize / 2,                                                                                                           
+                    y: y * gridSize + gridSize / 2,                                                                                                           
+                    state: STATE.HEALTHY,                                                                                                                     
+                    burnTime: 0,                                                                                                                              
+                    burnDuration: 800 + Math.random() * 400                                                                                                   
+                });                                                                                                                                           
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Particles for smoke and embers                                                                                                                     
+        let particles = [];                                                                                                                                   
+                                                                                                                                                              
+        // Start fires in random spots                                                                                                                        
+        function igniteRandomFires(count) {                                                                                                                   
+            for (let i = 0; i < count; i++) {                                                                                                                 
+                const idx = Math.floor(Math.random() * trees.length);                                                                                         
+                if (trees[idx].state === STATE.HEALTHY) {                                                                                                     
+                    trees[idx].state = STATE.BURNING;                                                                                                         
+                    trees[idx].burnTime = 0;                                                                                                                  
+                }                                                                                                                                             
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Also start a fire in the center                                                                                                                    
+        function igniteCenterFire() {                                                                                                                         
+            const centerX = Math.floor(cols / 2);                                                                                                             
+            const centerY = Math.floor(rows / 2);                                                                                                             
+            const centerIdx = centerY * cols + centerX;                                                                                                       
+            if (trees[centerIdx].state === STATE.HEALTHY) {                                                                                                   
+                trees[centerIdx].state = STATE.BURNING;                                                                                                       
+                trees[centerIdx].burnTime = 0;                                                                                                                
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Initialize fires                                                                                                                                   
+        igniteCenterFire();                                                                                                                                   
+        igniteRandomFires(2);                                                                                                                                 
+                                                                                                                                                              
+        // Update wind direction periodically                                                                                                                 
+        function updateWind() {                                                                                                                               
+            wind.x += (Math.random() - 0.5) * 0.1;                                                                                                            
+            wind.y += (Math.random() - 0.5) * 0.05;                                                                                                           
+            wind.x = Math.max(0.5, Math.min(3.0, wind.x));                                                                                                    
+            wind.y = Math.max(-0.5, Math.min(0.5, wind.y));                                                                                                   
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Create particles from burning trees                                                                                                                
+        function emitParticles(tree) {                                                                                                                        
+            if (Math.random() < 0.4) {                                                                                                                        
+                // Smoke particles                                                                                                                            
+                particles.push({                                                                                                                              
+                    x: tree.x,                                                                                                                                
+                    y: tree.y,                                                                                                                                
+                    vx: (Math.random() - 0.5) * 0.5 + wind.x * 0.1,                                                                                           
+                    vy: -1.5 - Math.random() * 1.0,                                                                                                           
+                    radius: Math.random() * 3 + 1,                                                                                                            
+                    color: `rgba(150, 150, 150, ${0.5 + Math.random() * 0.3})`,                                                                               
+                    life: 1.0,                                                                                                                                
+                    decay: 0.005 + Math.random() * 0.005                                                                                                      
+                });                                                                                                                                           
+            }                                                                                                                                                 
+            if (Math.random() < 0.3) {                                                                                                                        
+                // Ember particles                                                                                                                            
+                particles.push({                                                                                                                              
+                    x: tree.x,                                                                                                                                
+                    y: tree.y,                                                                                                                                
+                    vx: (Math.random() - 0.5) * 1.0 + wind.x * 0.3,                                                                                           
+                    vy: -0.5 - Math.random() * 0.5,                                                                                                           
+                    radius: Math.random() * 2 + 0.5,                                                                                                          
+                    color: `rgba(255, ${100 + Math.random() * 155}, 0, 1)`,                                                                                   
+                    life: 1.0,                                                                                                                                
+                    decay: 0.01 + Math.random() * 0.01                                                                                                        
+                });                                                                                                                                           
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Update particles                                                                                                                                   
+        function updateParticles(deltaTime) {                                                                                                                 
+            for (let i = particles.length - 1; i >= 0; i--) {                                                                                                 
+                const p = particles[i];                                                                                                                       
+                p.x += p.vx * deltaTime * speed;                                                                                                              
+                p.y += p.vy * deltaTime * speed;                                                                                                              
+                p.life -= p.decay * deltaTime * speed;                                                                                                        
+                                                                                                                                                              
+                if (p.life <= 0) {                                                                                                                            
+                    particles.splice(i, 1);                                                                                                                   
+                }                                                                                                                                             
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Draw ground background                                                                                                                             
+        function drawBackground() {                                                                                                                           
+            // Dark ground gradient                                                                                                                           
+            const gradient = ctx.createLinearGradient(0, 0, 0, height);                                                                                       
+            gradient.addColorStop(0, '#0a200a');                                                                                                              
+            gradient.addColorStop(1, '#051005');                                                                                                              
+            ctx.fillStyle = gradient;                                                                                                                         
+            ctx.fillRect(0, 0, width, height);                                                                                                                
+                                                                                                                                                              
+            // Ground texture                                                                                                                                 
+            ctx.fillStyle = 'rgba(20, 40, 10, 0.1)';                                                                                                          
+            for (let i = 0; i < 30; i++) {                                                                                                                    
+                const x = Math.random() * width;                                                                                                              
+                const y = Math.random() * height;                                                                                                             
+                const size = Math.random() * 2 + 1;                                                                                                           
+                ctx.fillRect(x, y, size, size);                                                                                                               
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Draw trees                                                                                                                                         
+        function drawTrees() {                                                                                                                                
+            trees.forEach(tree => {                                                                                                                           
+                switch (tree.state) {                                                                                                                         
+                    case STATE.HEALTHY:                                                                                                                       
+                        // Green tree with gradient                                                                                                           
+                        const healthyGradient = ctx.createRadialGradient(                                                                                     
+                            tree.x - 2, tree.y - 2, 0,                                                                                                        
+                            tree.x, tree.y, gridSize * 0.4                                                                                                    
+                        );                                                                                                                                    
+                        healthyGradient.addColorStop(0, '#2fa');                                                                                              
+                        healthyGradient.addColorStop(1, '#0a8');                                                                                              
+                        ctx.beginPath();                                                                                                                      
+                        ctx.arc(tree.x, tree.y, gridSize * 0.4, 0, Math.PI * 2);                                                                              
+                        ctx.fillStyle = healthyGradient;                                                                                                      
+                        ctx.fill();                                                                                                                           
+                        break;                                                                                                                                
+                                                                                                                                                              
+                    case STATE.BURNING:                                                                                                                       
+                        // Fire core with glow                                                                                                                
+                        const fireGradient = ctx.createRadialGradient(                                                                                        
+                            tree.x, tree.y, 0,                                                                                                                
+                            tree.x, tree.y, gridSize * 0.35                                                                                                   
+                        );                                                                                                                                    
+                        fireGradient.addColorStop(0, '#fff');                                                                                                 
+                        fireGradient.addColorStop(0.2, '#ff0');                                                                                               
+                        fireGradient.addColorStop(0.5, '#f80');                                                                                               
+                        fireGradient.addColorStop(1, '#f00');                                                                                                 
+                        ctx.beginPath();                                                                                                                      
+                        ctx.arc(tree.x, tree.y, gridSize * 0.35, 0, Math.PI * 2);                                                                             
+                        ctx.fillStyle = fireGradient;                                                                                                         
+                        ctx.fill();                                                                                                                           
+                                                                                                                                                              
+                        // Outer glow                                                                                                                         
+                        ctx.beginPath();                                                                                                                      
+                        ctx.arc(tree.x, tree.y, gridSize * 0.5, 0, Math.PI * 2);                                                                              
+                        ctx.fillStyle = 'rgba(255, 100, 0, 0.3)';                                                                                             
+                        ctx.fill();                                                                                                                           
+                        break;                                                                                                                                
+                                                                                                                                                              
+                    case STATE.BURNT:                                                                                                                         
+                        // Burnt tree                                                                                                                         
+                        ctx.beginPath();                                                                                                                      
+                        ctx.arc(tree.x, tree.y, gridSize * 0.3, 0, Math.PI * 2);                                                                              
+                        ctx.fillStyle = '#222';                                                                                                               
+                        ctx.fill();                                                                                                                           
+                                                                                                                                                              
+                        // Ash center                                                                                                                         
+                        ctx.beginPath();                                                                                                                      
+                        ctx.arc(tree.x, tree.y, gridSize * 0.15, 0, Math.PI * 2);                                                                             
+                        ctx.fillStyle = '#444';                                                                                                               
+                        ctx.fill();                                                                                                                           
+                        break;                                                                                                                                
+                }                                                                                                                                             
+            });                                                                                                                                               
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Draw particles                                                                                                                                     
+        function drawParticles() {                                                                                                                            
+            particles.forEach(p => {                                                                                                                          
+                const alpha = p.life;                                                                                                                         
+                ctx.beginPath();                                                                                                                              
+                ctx.arc(p.x, p.y, p.radius, 0, Math.PI * 2);                                                                                                  
+                if (p.color.includes('150, 150, 150')) {                                                                                                      
+                    // Smoke                                                                                                                                  
+                    ctx.fillStyle = `rgba(150, 150, 150, ${alpha * 0.5})`;                                                                                    
+                } else {                                                                                                                                      
+                    // Ember                                                                                                                                  
+                    ctx.fillStyle = p.color.replace(')', `, ${alpha})`).replace('rgba', 'rgba');                                                              
+                }                                                                                                                                             
+                ctx.fill();                                                                                                                                   
+            });                                                                                                                                               
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Spread fire to neighbors                                                                                                                           
+        function spreadFire(deltaTime) {                                                                                                                      
+            const treeCopy = [...trees];                                                                                                                      
+                                                                                                                                                              
+            for (let i = 0; i < treeCopy.length; i++) {                                                                                                       
+                const tree = treeCopy[i];                                                                                                                     
+                                                                                                                                                              
+                if (tree.state === STATE.BURNING) {                                                                                                           
+                    tree.burnTime += deltaTime * speed;                                                                                                       
+                                                                                                                                                              
+                    // Emit particles                                                                                                                         
+                    emitParticles(tree);                                                                                                                      
+                                                                                                                                                              
+                    // Transition to burnt state                                                                                                              
+                    if (tree.burnTime > tree.burnDuration) {                                                                                                  
+                        trees[i].state = STATE.BURNT;                                                                                                         
+                        continue;                                                                                                                             
+                    }                                                                                                                                         
+                                                                                                                                                              
+                    // Spread to neighbors                                                                                                                    
+                    for (let j = 0; j < treeCopy.length; j++) {                                                                                               
+                        if (i === j) continue;                                                                                                                
+                                                                                                                                                              
+                        const other = treeCopy[j];                                                                                                            
+                        if (other.state !== STATE.HEALTHY) continue;                                                                                          
+                                                                                                                                                              
+                        const dx = other.x - tree.x;                                                                                                          
+                        const dy = other.y - tree.y;                                                                                                          
+                        const distance = Math.sqrt(dx * dx + dy * dy);                                                                                        
+                                                                                                                                                              
+                        if (distance < gridSize * 1.8) {                                                                                                      
+                            const windEffect = (dx * wind.x + dy * wind.y) / distance;                                                                        
+                            const spreadChance = 0.015 * (1 + windEffect * 0.7);                                                                              
+                                                                                                                                                              
+                            if (Math.random() < spreadChance * deltaTime / 16) {                                                                              
+                                trees[j].state = STATE.BURNING;                                                                                               
+                                trees[j].burnTime = 0;                                                                                                        
+                            }                                                                                                                                 
+                        }                                                                                                                                     
+                    }                                                                                                                                         
+                }                                                                                                                                             
+            }                                                                                                                                                 
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Main animation loop                                                                                                                                
+        let lastTime = 0;                                                                                                                                     
+        let windUpdateTimer = 0;                                                                                                                              
+                                                                                                                                                              
+        function animate(currentTime) {                                                                                                                       
+            const deltaTime = currentTime - lastTime || 0;                                                                                                    
+            lastTime = currentTime;                                                                                                                           
+                                                                                                                                                              
+            windUpdateTimer += deltaTime;                                                                                                                     
+            if (windUpdateTimer > 800) {                                                                                                                      
+                updateWind();                                                                                                                                 
+                windUpdateTimer = 0;                                                                                                                          
+            }                                                                                                                                                 
+                                                                                                                                                              
+            ctx.clearRect(0, 0, width, height);                                                                                                               
+                                                                                                                                                              
+            drawBackground();                                                                                                                                 
+            spreadFire(deltaTime);                                                                                                                            
+            updateParticles(deltaTime);                                                                                                                       
+            drawTrees();                                                                                                                                      
+            drawParticles();                                                                                                                                  
+                                                                                                                                                              
+            requestAnimationFrame(animate);                                                                                                                   
+        }                                                                                                                                                     
+                                                                                                                                                              
+        // Start animation                                                                                                                                    
+        animate(0);                                                                                                                                           
+                                                                                                                                                              
+        // Add new fires periodically for continuous simulation                                                                                               
+        setInterval(() => {                                                                                                                                   
+            if (Math.random() < 0.08) {                                                                                                                       
+                igniteRandomFires(1);                                                                                                                         
+            }                                                                                                                                                 
+        }, 4000);                                                                                                                                             
+    </script>                                                                                                                                                 
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-16_wildfire_simulation/deepseek.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-16_wildfire_simulation/deepseek.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>                                                                                                                                                       
+</html>   
