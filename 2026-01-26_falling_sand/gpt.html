@@ -1,0 +1,756 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="color-scheme" content="dark" />
+<style>
+html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+body { }
+#wrap {
+    position: relative;
+    background: #000;
+}
+canvas {
+    display: block;
+    background: #000;
+}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<script>
+(() => {
+    'use strict';
+
+    const params = new URLSearchParams(location.search);
+
+    function readNumber(name, fallback) {
+        const raw = params.get(name);
+        if (raw === null) return fallback;
+        const n = Number(raw);
+        return Number.isFinite(n) ? n : fallback;
+    }
+
+    function clamp(n, lo, hi) {
+        if (!Number.isFinite(n)) return lo;
+        if (n < lo) return lo;
+        if (n > hi) return hi;
+        return n;
+    }
+
+    let w = Math.floor(clamp(readNumber('w', 416), 64, 2048));
+    let h = Math.floor(clamp(readNumber('h', 416), 64, 2048));
+    let loopMs = clamp(readNumber('loop', 10000), 1000, 600000);
+    let speed = clamp(readNumber('speed', 1), 0, 12);
+
+    let syncEpochMs = readNumber('t0', 0);
+    if (!Number.isFinite(syncEpochMs)) syncEpochMs = 0;
+
+    let phaseOffsetMs = readNumber('phase', 0);
+    if (!Number.isFinite(phaseOffsetMs)) phaseOffsetMs = 0;
+
+    const wrap = document.getElementById('wrap');
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('2D canvas context unavailable');
+
+    const GRID = 100;
+    const N = GRID * GRID;
+
+    const EMPTY = 0;
+    const SAND = 1;
+    const WATER = 2;
+    const WOOD = 3;
+    const BEDROCK = 4;
+    const ACID = 5;
+
+    let cells = new Uint8Array(N);
+    let life = new Uint16Array(N);
+    let updated = new Uint8Array(N);
+
+    const gridCanvas = document.createElement('canvas');
+    gridCanvas.width = GRID;
+    gridCanvas.height = GRID;
+    const gctx = gridCanvas.getContext('2d', { willReadFrequently: true });
+    if (!gctx) throw new Error('Offscreen 2D context unavailable');
+
+    const img = gctx.createImageData(GRID, GRID);
+    const pix = img.data;
+
+    const overlayCanvas = document.createElement('canvas');
+    const octx = overlayCanvas.getContext('2d');
+    if (!octx) throw new Error('Overlay 2D context unavailable');
+
+    let dpr = 1;
+    let scale = 4;
+    let drawW = 400;
+    let drawH = 400;
+    let offX = 8;
+    let offY = 8;
+    let vignette = null;
+
+    let rngState = 0x12345678 >>> 0;
+
+    function u32(x) { return (x >>> 0); }
+
+    function mixSeed(a) {
+        a = u32(a);
+        a ^= a >>> 16;
+        a = Math.imul(a, 0x7feb352d);
+        a ^= a >>> 15;
+        a = Math.imul(a, 0x846ca68b);
+        a ^= a >>> 16;
+        return u32(a);
+    }
+
+    function randU32() {
+        let x = rngState >>> 0;
+        x ^= (x << 13) >>> 0;
+        x ^= (x >>> 17) >>> 0;
+        x ^= (x << 5) >>> 0;
+        rngState = x >>> 0;
+        return rngState;
+    }
+
+    function rand01() {
+        return randU32() / 4294967296;
+    }
+
+    function randInt(lo, hi) {
+        const span = hi - lo + 1;
+        return lo + (randU32() % span);
+    }
+
+    function idx(x, y) {
+        return y * GRID + x;
+    }
+
+    function setCell(i, t, l) {
+        cells[i] = t;
+        life[i] = l;
+    }
+
+    function swapCells(i1, i2) {
+        const t = cells[i1];
+        cells[i1] = cells[i2];
+        cells[i2] = t;
+
+        const l = life[i1];
+        life[i1] = life[i2];
+        life[i2] = l;
+
+        updated[i1] = 1;
+        updated[i2] = 1;
+    }
+
+    function moveCell(i1, i2) {
+        cells[i2] = cells[i1];
+        life[i2] = life[i1];
+        cells[i1] = EMPTY;
+        life[i1] = 0;
+        updated[i1] = 1;
+        updated[i2] = 1;
+    }
+
+    function isSolid(t) {
+        return t === WOOD || t === BEDROCK;
+    }
+
+    function isLiquid(t) {
+        return t === WATER || t === ACID;
+    }
+
+    function resize() {
+        dpr = Math.max(1, Math.min(3, (window.devicePixelRatio || 1)));
+
+        wrap.style.width = w + 'px';
+        wrap.style.height = h + 'px';
+
+        canvas.style.width = w + 'px';
+        canvas.style.height = h + 'px';
+        canvas.width = Math.floor(w * dpr);
+        canvas.height = Math.floor(h * dpr);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+
+        const minSide = Math.min(w, h);
+        scale = Math.max(1, Math.floor(minSide / GRID));
+        drawW = scale * GRID;
+        drawH = scale * GRID;
+        offX = Math.floor((w - drawW) * 0.5);
+        offY = Math.floor((h - drawH) * 0.5);
+
+        overlayCanvas.width = w;
+        overlayCanvas.height = h;
+        octx.setTransform(1, 0, 0, 1, 0, 0);
+        octx.clearRect(0, 0, w, h);
+
+        // Subtle scanlines + speckle (no text, no HUD)
+        const scanAlpha = 0.06;
+        octx.fillStyle = 'rgba(255,255,255,' + scanAlpha + ')';
+        for (let y = 0; y < h; y += 2) {
+            octx.fillRect(0, y, w, 1);
+        }
+        // Speckle
+        rngState = 0xA341316C;
+        const specks = Math.floor((w * h) / 220);
+        for (let i = 0; i < specks; i++) {
+            const x = randInt(0, w - 1);
+            const y = randInt(0, h - 1);
+            const a = 0.035 + 0.045 * rand01();
+            octx.fillStyle = 'rgba(120,200,255,' + a.toFixed(4) + ')';
+            octx.fillRect(x, y, 1, 1);
+        }
+
+        // Vignette
+        const cx = w * 0.5;
+        const cy = h * 0.5;
+        const r0 = Math.min(w, h) * 0.25;
+        const r1 = Math.min(w, h) * 0.72;
+        vignette = ctx.createRadialGradient(cx, cy, r0, cx, cy, r1);
+        vignette.addColorStop(0.0, 'rgba(0,0,0,0)');
+        vignette.addColorStop(0.55, 'rgba(0,0,0,0.12)');
+        vignette.addColorStop(1.0, 'rgba(0,0,0,0.62)');
+    }
+
+    function resetWorld(loopIndex) {
+        const li = Number.isFinite(loopIndex) ? loopIndex : 0;
+        const folded = ((li % 4294967296) + 4294967296) % 4294967296;
+        rngState = mixSeed(u32(folded) ^ 0x9e3779b9 ^ 0xC0FFEE11);
+
+        cells.fill(EMPTY);
+        life.fill(0);
+
+        // Bedrock boundaries
+        for (let x = 0; x < GRID; x++) {
+            setCell(idx(x, GRID - 1), BEDROCK, 0);
+        }
+        for (let y = 0; y < GRID; y++) {
+            setCell(idx(0, y), BEDROCK, 0);
+            setCell(idx(GRID - 1, y), BEDROCK, 0);
+        }
+
+        // 3 wood platforms, at least 1/3 width
+        const minW = Math.max(34, Math.floor(GRID / 3));
+        for (let p = 0; p < 3; p++) {
+            const y0 = randInt(18, 72);
+            const width = randInt(minW, Math.min(GRID - 4, 78));
+            const x0 = randInt(2, Math.max(2, GRID - 2 - width));
+            const thick = randInt(2, 4);
+            for (let y = y0; y < Math.min(GRID - 1, y0 + thick); y++) {
+                for (let x = x0; x < Math.min(GRID - 1, x0 + width); x++) {
+                    const i = idx(x, y);
+                    if (cells[i] === EMPTY) setCell(i, WOOD, 0);
+                }
+            }
+        }
+
+        // A few tiny wood chips for texture (deterministic)
+        const chips = 120;
+        for (let k = 0; k < chips; k++) {
+            const x = randInt(2, GRID - 3);
+            const y = randInt(6, GRID - 10);
+            const i = idx(x, y);
+            if (cells[i] === EMPTY && rand01() < 0.22) setCell(i, WOOD, 0);
+        }
+    }
+
+    function smoothstep(a, b, x) {
+        const t = clamp((x - a) / (b - a), 0, 1);
+        return t * t * (3 - 2 * t);
+    }
+
+    function spawnSand() {
+        const cx = (GRID / 2) | 0;
+        const width = 3;
+        const tries = 5;
+        for (let t = 0; t < tries; t++) {
+            const x = cx + randInt(-width, width);
+            const y = randInt(0, 1);
+            if (x <= 0 || x >= GRID - 1) continue;
+            const i = idx(x, y);
+            if (cells[i] === EMPTY) {
+                setCell(i, SAND, 0);
+                break;
+            }
+        }
+    }
+
+    function spawnWater(progress) {
+        const cx = (GRID / 2) | 0;
+        const amp = 38;
+        const s = Math.sin(progress * Math.PI * 2);
+        const s2 = Math.sin(progress * Math.PI * 4 + 1.2);
+        const ex = Math.round(cx + amp * (0.78 * s + 0.22 * s2));
+        const spread = 4;
+
+        const wash = smoothstep(0.28, 0.55, progress) * (1 - smoothstep(0.78, 0.95, progress));
+        const baseRate = 1.0 + 1.8 * wash;
+        const extra = (rand01() < (baseRate - Math.floor(baseRate))) ? 1 : 0;
+        const drops = Math.floor(baseRate) + extra;
+
+        for (let n = 0; n < drops; n++) {
+            const x = ex + randInt(-spread, spread);
+            const y = randInt(0, 2);
+            if (x <= 0 || x >= GRID - 1) continue;
+            const i = idx(x, y);
+            if (cells[i] === EMPTY) setCell(i, WATER, 0);
+            else if (cells[i] === SAND && rand01() < 0.18) setCell(i, WATER, 0);
+        }
+    }
+
+    function spawnAcid(progress, stepCount) {
+        // Requested cadence: every 60 frames, plus a late-loop burst
+        let interval = 60;
+        const burst = smoothstep(0.62, 0.92, progress);
+        if (burst > 0) interval = Math.max(24, Math.floor(60 - 36 * burst));
+
+        if (stepCount % interval !== 0) return;
+
+        const drops = 1 + (rand01() < burst * 0.85 ? 1 : 0) + (rand01() < burst * 0.35 ? 1 : 0);
+        for (let d = 0; d < drops; d++) {
+            const x = randInt(8, GRID - 9);
+            const y = randInt(0, 6);
+            const i = idx(x, y);
+            if (cells[i] === BEDROCK) continue;
+            if (cells[i] === EMPTY || cells[i] === WATER) {
+                const L = randInt(80, 170);
+                setCell(i, ACID, L);
+            } else if (cells[i] === SAND && rand01() < 0.6) {
+                const L = randInt(80, 170);
+                setCell(i, ACID, L);
+            }
+        }
+    }
+
+    function corrodeAt(x, y, strength) {
+        if (x <= 0 || x >= GRID - 1 || y <= 0 || y >= GRID - 1) return 0;
+        const i = idx(x, y);
+        const t = cells[i];
+        if (t === BEDROCK || t === EMPTY) return 0;
+
+        if (t === SAND) {
+            if (rand01() < 0.32 * strength) {
+                setCell(i, EMPTY, 0);
+                return 1;
+            }
+        } else if (t === WOOD) {
+            if (rand01() < 0.07 * strength) {
+                setCell(i, EMPTY, 0);
+                return 1;
+            }
+        } else if (t === WATER) {
+            if (rand01() < 0.06 * strength) {
+                setCell(i, EMPTY, 0);
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    function stepSim(progress, stepCount) {
+        updated.fill(0);
+
+        // Spawners
+        const build = (1 - smoothstep(0.40, 0.70, progress));
+        const sandPerStep = 3 + Math.floor(6 * build);
+        for (let i = 0; i < sandPerStep; i++) spawnSand();
+        spawnWater(progress);
+        spawnAcid(progress, stepCount);
+
+        const parity = stepCount & 1;
+
+        for (let y = GRID - 2; y >= 0; y--) {
+            if (parity === 0) {
+                for (let x = 1; x < GRID - 1; x++) {
+                    const i = idx(x, y);
+                    if (updated[i]) continue;
+                    const t = cells[i];
+
+                    if (t === SAND) {
+                        const below = idx(x, y + 1);
+                        const tb = cells[below];
+                        if (tb === EMPTY) { moveCell(i, below); continue; }
+                        if (tb === WATER || tb === ACID) { swapCells(i, below); continue; }
+
+                        const firstLeft = (randU32() & 1) === 0;
+                        const dx1 = firstLeft ? -1 : 1;
+                        const dx2 = -dx1;
+
+                        const d1 = idx(x + dx1, y + 1);
+                        const t1 = cells[d1];
+                        if (t1 === EMPTY) { moveCell(i, d1); continue; }
+                        if (t1 === WATER || t1 === ACID) { swapCells(i, d1); continue; }
+
+                        const d2 = idx(x + dx2, y + 1);
+                        const t2 = cells[d2];
+                        if (t2 === EMPTY) { moveCell(i, d2); continue; }
+                        if (t2 === WATER || t2 === ACID) { swapCells(i, d2); continue; }
+
+                        updated[i] = 1;
+                    } else if (t === WATER) {
+                        const below = idx(x, y + 1);
+                        const tb = cells[below];
+                        if (tb === EMPTY) { moveCell(i, below); continue; }
+                        if (tb === ACID) { swapCells(i, below); continue; }
+
+                        const firstLeft = (randU32() & 1) === 0;
+                        const dx1 = firstLeft ? -1 : 1;
+                        const dx2 = -dx1;
+
+                        const d1 = idx(x + dx1, y + 1);
+                        if (cells[d1] === EMPTY) { moveCell(i, d1); continue; }
+                        const d2 = idx(x + dx2, y + 1);
+                        if (cells[d2] === EMPTY) { moveCell(i, d2); continue; }
+
+                        const s1 = idx(x + dx1, y);
+                        if (cells[s1] === EMPTY) { moveCell(i, s1); continue; }
+                        const s2 = idx(x + dx2, y);
+                        if (cells[s2] === EMPTY) { moveCell(i, s2); continue; }
+
+                        updated[i] = 1;
+                    } else if (t === ACID) {
+                        let L = life[i];
+                        if (L === 0) { setCell(i, EMPTY, 0); updated[i] = 1; continue; }
+                        L = (L > 0) ? (L - 1) : 0;
+                        life[i] = L;
+
+                        const strength = 0.85 + 0.55 * smoothstep(0.55, 0.95, progress);
+                        let eats = 0;
+                        eats += corrodeAt(x, y + 1, strength);
+                        eats += corrodeAt(x, y - 1, strength);
+                        eats += corrodeAt(x - 1, y, strength);
+                        eats += corrodeAt(x + 1, y, strength);
+                        if (eats > 0 && life[i] > 2) life[i] = life[i] - 2;
+
+                        const below = idx(x, y + 1);
+                        const tb = cells[below];
+                        if (tb === EMPTY) { moveCell(i, below); continue; }
+                        if (tb === WATER) { swapCells(i, below); continue; }
+
+                        const firstLeft = (randU32() & 1) === 0;
+                        const dx1 = firstLeft ? -1 : 1;
+                        const dx2 = -dx1;
+
+                        const d1 = idx(x + dx1, y + 1);
+                        const t1 = cells[d1];
+                        if (t1 === EMPTY) { moveCell(i, d1); continue; }
+                        if (t1 === WATER) { swapCells(i, d1); continue; }
+
+                        const d2 = idx(x + dx2, y + 1);
+                        const t2 = cells[d2];
+                        if (t2 === EMPTY) { moveCell(i, d2); continue; }
+                        if (t2 === WATER) { swapCells(i, d2); continue; }
+
+                        const s1 = idx(x + dx1, y);
+                        const ts1 = cells[s1];
+                        if (ts1 === EMPTY) { moveCell(i, s1); continue; }
+                        if (ts1 === WATER && rand01() < 0.35) { swapCells(i, s1); continue; }
+
+                        const s2 = idx(x + dx2, y);
+                        const ts2 = cells[s2];
+                        if (ts2 === EMPTY) { moveCell(i, s2); continue; }
+                        if (ts2 === WATER && rand01() < 0.35) { swapCells(i, s2); continue; }
+
+                        if (life[i] === 0) setCell(i, EMPTY, 0);
+                        updated[i] = 1;
+                    } else if (isSolid(t) || t === BEDROCK) {
+                        updated[i] = 1;
+                    } else {
+                        updated[i] = 1;
+                    }
+                }
+            } else {
+                for (let x = GRID - 2; x >= 1; x--) {
+                    const i = idx(x, y);
+                    if (updated[i]) continue;
+                    const t = cells[i];
+
+                    if (t === SAND) {
+                        const below = idx(x, y + 1);
+                        const tb = cells[below];
+                        if (tb === EMPTY) { moveCell(i, below); continue; }
+                        if (tb === WATER || tb === ACID) { swapCells(i, below); continue; }
+
+                        const firstLeft = (randU32() & 1) === 0;
+                        const dx1 = firstLeft ? -1 : 1;
+                        const dx2 = -dx1;
+
+                        const d1 = idx(x + dx1, y + 1);
+                        const t1 = cells[d1];
+                        if (t1 === EMPTY) { moveCell(i, d1); continue; }
+                        if (t1 === WATER || t1 === ACID) { swapCells(i, d1); continue; }
+
+                        const d2 = idx(x + dx2, y + 1);
+                        const t2 = cells[d2];
+                        if (t2 === EMPTY) { moveCell(i, d2); continue; }
+                        if (t2 === WATER || t2 === ACID) { swapCells(i, d2); continue; }
+
+                        updated[i] = 1;
+                    } else if (t === WATER) {
+                        const below = idx(x, y + 1);
+                        const tb = cells[below];
+                        if (tb === EMPTY) { moveCell(i, below); continue; }
+                        if (tb === ACID) { swapCells(i, below); continue; }
+
+                        const firstLeft = (randU32() & 1) === 0;
+                        const dx1 = firstLeft ? -1 : 1;
+                        const dx2 = -dx1;
+
+                        const d1 = idx(x + dx1, y + 1);
+                        if (cells[d1] === EMPTY) { moveCell(i, d1); continue; }
+                        const d2 = idx(x + dx2, y + 1);
+                        if (cells[d2] === EMPTY) { moveCell(i, d2); continue; }
+
+                        const s1 = idx(x + dx1, y);
+                        if (cells[s1] === EMPTY) { moveCell(i, s1); continue; }
+                        const s2 = idx(x + dx2, y);
+                        if (cells[s2] === EMPTY) { moveCell(i, s2); continue; }
+
+                        updated[i] = 1;
+                    } else if (t === ACID) {
+                        let L = life[i];
+                        if (L === 0) { setCell(i, EMPTY, 0); updated[i] = 1; continue; }
+                        L = (L > 0) ? (L - 1) : 0;
+                        life[i] = L;
+
+                        const strength = 0.85 + 0.55 * smoothstep(0.55, 0.95, progress);
+                        let eats = 0;
+                        eats += corrodeAt(x, y + 1, strength);
+                        eats += corrodeAt(x, y - 1, strength);
+                        eats += corrodeAt(x - 1, y, strength);
+                        eats += corrodeAt(x + 1, y, strength);
+                        if (eats > 0 && life[i] > 2) life[i] = life[i] - 2;
+
+                        const below = idx(x, y + 1);
+                        const tb = cells[below];
+                        if (tb === EMPTY) { moveCell(i, below); continue; }
+                        if (tb === WATER) { swapCells(i, below); continue; }
+
+                        const firstLeft = (randU32() & 1) === 0;
+                        const dx1 = firstLeft ? -1 : 1;
+                        const dx2 = -dx1;
+
+                        const d1 = idx(x + dx1, y + 1);
+                        const t1 = cells[d1];
+                        if (t1 === EMPTY) { moveCell(i, d1); continue; }
+                        if (t1 === WATER) { swapCells(i, d1); continue; }
+
+                        const d2 = idx(x + dx2, y + 1);
+                        const t2 = cells[d2];
+                        if (t2 === EMPTY) { moveCell(i, d2); continue; }
+                        if (t2 === WATER) { swapCells(i, d2); continue; }
+
+                        const s1 = idx(x + dx1, y);
+                        const ts1 = cells[s1];
+                        if (ts1 === EMPTY) { moveCell(i, s1); continue; }
+                        if (ts1 === WATER && rand01() < 0.35) { swapCells(i, s1); continue; }
+
+                        const s2 = idx(x + dx2, y);
+                        const ts2 = cells[s2];
+                        if (ts2 === EMPTY) { moveCell(i, s2); continue; }
+                        if (ts2 === WATER && rand01() < 0.35) { swapCells(i, s2); continue; }
+
+                        if (life[i] === 0) setCell(i, EMPTY, 0);
+                        updated[i] = 1;
+                    } else if (isSolid(t) || t === BEDROCK) {
+                        updated[i] = 1;
+                    } else {
+                        updated[i] = 1;
+                    }
+                }
+            }
+        }
+
+        // Safety: keep bedrock row intact
+        for (let x = 0; x < GRID; x++) {
+            const i = idx(x, GRID - 1);
+            cells[i] = BEDROCK;
+            life[i] = 0;
+        }
+        for (let y = 0; y < GRID; y++) {
+            let i0 = idx(0, y);
+            let i1 = idx(GRID - 1, y);
+            cells[i0] = BEDROCK; life[i0] = 0;
+            cells[i1] = BEDROCK; life[i1] = 0;
+        }
+    }
+
+    // Neon palette (high-contrast on black)
+    const col = new Uint32Array(6);
+    // Packed RGBA little-endian write later via bytes
+    // We'll write per-pixel bytes directly for portability.
+    function paintPixels(progress) {
+        // Subtle palette breathing via progress-dependent brightness (no text)
+        const pulse = 0.78 + 0.22 * Math.sin(progress * Math.PI * 2);
+        const sandB = 0.86 + 0.10 * pulse;
+        const waterB = 0.82 + 0.12 * (1 - pulse);
+        const acidB = 0.84 + 0.14 * Math.sin(progress * Math.PI * 4 + 0.7);
+        const woodB = 0.66 + 0.10 * Math.sin(progress * Math.PI * 2 + 1.1);
+
+        let p = 0;
+        for (let i = 0; i < N; i++) {
+            const t = cells[i];
+            let r = 0, g = 0, b = 0, a = 255;
+
+            if (t === EMPTY) {
+                r = 0; g = 0; b = 0; a = 255;
+            } else if (t === SAND) {
+                r = Math.floor(255 * sandB);
+                g = Math.floor(210 * sandB);
+                b = Math.floor(40 * sandB);
+            } else if (t === WATER) {
+                r = Math.floor(50 * waterB);
+                g = Math.floor(165 * waterB);
+                b = Math.floor(255 * waterB);
+            } else if (t === ACID) {
+                r = Math.floor(55 * acidB);
+                g = Math.floor(255 * acidB);
+                b = Math.floor(95 * acidB);
+            } else if (t === WOOD) {
+                r = Math.floor(190 * woodB);
+                g = Math.floor(92 * woodB);
+                b = Math.floor(34 * woodB);
+            } else { // BEDROCK
+                r = 24; g = 24; b = 28;
+            }
+
+            pix[p++] = r;
+            pix[p++] = g;
+            pix[p++] = b;
+            pix[p++] = a;
+        }
+        gctx.putImageData(img, 0, 0);
+    }
+
+    function draw(progress) {
+        const fadeIn = smoothstep(0.02, 0.12, progress);
+        const fadeOut = 1 - smoothstep(0.88, 0.98, progress);
+        const sceneAlpha = clamp(fadeIn * fadeOut, 0, 1);
+
+        // Background
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.globalAlpha = 1;
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, w, h);
+
+        paintPixels(progress);
+
+        ctx.imageSmoothingEnabled = false;
+
+        // Base pixels
+        ctx.globalAlpha = sceneAlpha;
+        ctx.drawImage(gridCanvas, offX, offY, drawW, drawH);
+
+        // Glow pass (neon bloom)
+        const wash = smoothstep(0.28, 0.55, progress) * (1 - smoothstep(0.80, 0.98, progress));
+        const acidStorm = smoothstep(0.60, 0.93, progress);
+
+        const glow = (0.55 + 0.55 * wash + 0.35 * acidStorm) * sceneAlpha;
+        const blurPx = Math.max(2, Math.min(18, scale * (0.55 + 0.65 * wash + 0.55 * acidStorm)));
+
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = glow;
+        ctx.filter = 'blur(' + blurPx.toFixed(2) + 'px)';
+        ctx.drawImage(gridCanvas, offX, offY, drawW, drawH);
+        ctx.drawImage(gridCanvas, offX + 1, offY, drawW, drawH);
+        ctx.drawImage(gridCanvas, offX - 1, offY, drawW, drawH);
+        ctx.filter = 'none';
+        ctx.restore();
+
+        // Subtle chroma ghosting (retro)
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.globalAlpha = 0.10 * sceneAlpha;
+        ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(gridCanvas, offX + 2, offY + 1, drawW, drawH);
+        ctx.restore();
+
+        // Overlay scanlines + speckle
+        ctx.save();
+        ctx.globalCompositeOperation = 'screen';
+        ctx.globalAlpha = 0.25 * sceneAlpha;
+        ctx.drawImage(overlayCanvas, 0, 0);
+        ctx.restore();
+
+        // Vignette
+        if (vignette) {
+            ctx.save();
+            ctx.globalCompositeOperation = 'multiply';
+            ctx.globalAlpha = 0.95;
+            ctx.fillStyle = vignette;
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+
+        // Edge fade to further hide loop reset
+        const edgeFade = smoothstep(0.90, 1.0, progress) + (1 - smoothstep(0.0, 0.06, progress));
+        if (edgeFade > 0) {
+            ctx.save();
+            ctx.globalCompositeOperation = 'source-over';
+            ctx.globalAlpha = clamp(edgeFade * 0.55, 0, 0.65);
+            ctx.fillStyle = '#000';
+            ctx.fillRect(0, 0, w, h);
+            ctx.restore();
+        }
+    }
+
+    resize();
+
+    const STEPS_PER_SEC = 60;
+    let lastNowMs = Date.now();
+    let lastLoopIndex = null;
+    let lastProgress = 0;
+    let lastStep = 0;
+
+    function frame() {
+        const nowMs = Date.now();
+
+        const loopIndex = Math.floor((nowMs - syncEpochMs + phaseOffsetMs) / loopMs);
+        const progress = ((nowMs - syncEpochMs + phaseOffsetMs) % loopMs + loopMs) % loopMs / loopMs;
+
+        if (lastLoopIndex === null || loopIndex !== lastLoopIndex) {
+            resetWorld(loopIndex);
+            lastLoopIndex = loopIndex;
+            lastStep = 0;
+            lastProgress = progress;
+        }
+
+        // Simulation time derived from wall-clock loop, scaled by speed.
+        const loopSec = loopMs / 1000;
+        const simSec = (progress * loopSec) * speed;
+        const desiredStep = Math.floor(simSec * STEPS_PER_SEC);
+
+        let stepsToRun = desiredStep - lastStep;
+        if (stepsToRun < 0) stepsToRun = 0;
+        if (stepsToRun > 900) stepsToRun = 900;
+
+        for (let s = 0; s < stepsToRun; s++) {
+            stepSim(progress, lastStep);
+            lastStep++;
+        }
+
+        draw(progress);
+
+        lastNowMs = nowMs;
+        lastProgress = progress;
+        requestAnimationFrame(frame);
+    }
+
+    requestAnimationFrame(frame);
+
+    // Allow live param changes via reload; no interaction required.
+})();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-26_falling_sand/gpt.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-26_falling_sand/gpt.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

@@ -1,0 +1,28 @@
+# System Requirements
+
+You are a senior creative-coder + frontend engineer. Produce ONE self-contained HTML file with embedded CSS + JS.
+
+TARGET: a polished, visually compelling animation/simulation.
+
+HARD REQUIREMENTS (MUST FOLLOW):
+
+1) Headline behavior check (system-level): the main “promise” of the scene must be clearly visible. It must not be so rare that it often fails to appear. If the concept supports repetition, it should occur multiple times, but at minimum it must occur clearly at least once.
+- No “dead air”: the main visual action must remain clearly present. Avoid designs where the primary effect stalls or disappears for long stretches (e.g., spawners getting blocked so nothing happens for seconds). If the concept uses emission/spawners, ensure emission cannot permanently stall (pick alternate spawn locations, clear the spawn lane, or overwrite when safe).
+
+2) Dark background (#000 or similar).
+- No external assets/resources (no fonts/images/network).
+- Use Canvas 2D, SVG, or CSS only.
+
+4) Make it visually rich (depth, layering, glow/trails, coherent motion).
+- Avoid 'dead time': keep noticeable evolution across the full simulation, not just the first seconds.
+
+Create a retro 'Falling Sand' physics toy (Cellular Automata) that plays itself.
+
+The Setup:
+1. The Grid: Use a 100x100 logical grid scaled up to fit the screen (Chunky Pixels).
+2. The Map: 3 random 'Wood' (Brown) platforms (At least 1/3 width of the box). Bottom is Bedrock (Indestructible).
+3. The Main Spawner (Fixed): A FAST stream of Sand (Yellow) from the Top-Center. It creates a giant central pyramid.
+4. The Secondary Spawner (Moving): A Water (Blue) emitter that oscillates Left <-> Right to wash over the sand.
+5. The Chaos: Every 60 frames, spawn random Acid (Green) drops to melt holes in the pyramid.
+6. The Visuals: High-contrast Neon colors on Black.
+

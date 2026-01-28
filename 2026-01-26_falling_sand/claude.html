@@ -1,0 +1,387 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Falling Sand</title>
+<style>
+html, body { margin: 0; padding: 0; background: #000; overflow: hidden; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  
+  function getParam(name, def, min, max) {
+    const v = parseFloat(params.get(name));
+    if (!Number.isFinite(v)) return def;
+    return Math.max(min, Math.min(max, v));
+  }
+  
+  const w = getParam('w', 416, 16, 4096);
+  const h = getParam('h', 416, 16, 4096);
+  const loop = getParam('loop', 10000, 1000, 600000);
+  const speed = getParam('speed', 1, 0.01, 100);
+  
+  const t0Str = params.get('t0');
+  const syncEpochMs = (t0Str !== null && Number.isFinite(parseFloat(t0Str))) ? parseFloat(t0Str) : 0;
+  const phaseStr = params.get('phase');
+  const phaseOffsetMs = (phaseStr !== null && Number.isFinite(parseFloat(phaseStr))) ? parseFloat(phaseStr) : 0;
+  
+  const canvas = document.getElementById('c');
+  const ctx = canvas.getContext('2d');
+  if (!ctx) throw new Error('Failed to get 2D context');
+  
+  const dpr = window.devicePixelRatio || 1;
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  
+  const GRID_W = 100;
+  const GRID_H = 100;
+  const CELL_W = w / GRID_W;
+  const CELL_H = h / GRID_H;
+  
+  const EMPTY = 0;
+  const SAND = 1;
+  const WATER = 2;
+  const WOOD = 3;
+  const BEDROCK = 4;
+  const ACID = 5;
+  
+  const COLORS = {
+    [EMPTY]: '#000000',
+    [SAND]: '#FFD700',
+    [WATER]: '#00BFFF',
+    [WOOD]: '#8B4513',
+    [BEDROCK]: '#444444',
+    [ACID]: '#39FF14'
+  };
+  
+  let grid = [];
+  let platforms = [];
+  let lastLoopIndex = -1;
+  let frameCount = 0;
+  let waterX = 10;
+  let waterDir = 1;
+  
+  function mulberry32(a) {
+    return function() {
+      let t = a += 0x6D2B79F5;
+      t = Math.imul(t ^ t >>> 15, t | 1);
+      t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+  
+  let rng = mulberry32(12345);
+  
+  function initGrid() {
+    grid = [];
+    for (let y = 0; y < GRID_H; y++) {
+      grid[y] = [];
+      for (let x = 0; x < GRID_W; x++) {
+        grid[y][x] = EMPTY;
+      }
+    }
+    
+    for (let x = 0; x < GRID_W; x++) {
+      grid[GRID_H - 1][x] = BEDROCK;
+    }
+    
+    platforms = [];
+    rng = mulberry32(12345);
+    
+    for (let i = 0; i < 3; i++) {
+      const platWidth = Math.floor(GRID_W / 3 + rng() * (GRID_W / 4));
+      const platX = Math.floor(rng() * (GRID_W - platWidth));
+      const platY = 25 + Math.floor(i * 20) + Math.floor(rng() * 10);
+      
+      platforms.push({ x: platX, y: platY, w: platWidth });
+      
+      for (let px = platX; px < platX + platWidth && px < GRID_W; px++) {
+        if (platY < GRID_H - 1) {
+          grid[platY][px] = WOOD;
+        }
+      }
+    }
+    
+    frameCount = 0;
+    waterX = 10;
+    waterDir = 1;
+  }
+  
+  function getCell(x, y) {
+    if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return BEDROCK;
+    return grid[y][x];
+  }
+  
+  function setCell(x, y, val) {
+    if (x < 0 || x >= GRID_W || y < 0 || y >= GRID_H) return;
+    grid[y][x] = val;
+  }
+  
+  function isEmpty(x, y) {
+    return getCell(x, y) === EMPTY;
+  }
+  
+  function isLiquid(x, y) {
+    const c = getCell(x, y);
+    return c === WATER || c === ACID;
+  }
+  
+  function canDisplace(x, y, fromType) {
+    const c = getCell(x, y);
+    if (c === EMPTY) return true;
+    if (fromType === SAND && (c === WATER || c === ACID)) return true;
+    return false;
+  }
+  
+  function updateGrid() {
+    const processed = [];
+    for (let y = 0; y < GRID_H; y++) {
+      processed[y] = [];
+      for (let x = 0; x < GRID_W; x++) {
+        processed[y][x] = false;
+      }
+    }
+    
+    for (let y = GRID_H - 2; y >= 0; y--) {
+      const dir = rng() < 0.5 ? 1 : -1;
+      for (let i = 0; i < GRID_W; i++) {
+        const x = dir === 1 ? i : (GRID_W - 1 - i);
+        
+        if (processed[y][x]) continue;
+        
+        const cell = grid[y][x];
+        
+        if (cell === SAND) {
+          if (isEmpty(x, y + 1)) {
+            setCell(x, y + 1, SAND);
+            setCell(x, y, EMPTY);
+            processed[y + 1][x] = true;
+          } else if (isLiquid(x, y + 1)) {
+            const liquid = getCell(x, y + 1);
+            setCell(x, y + 1, SAND);
+            setCell(x, y, liquid);
+            processed[y + 1][x] = true;
+          } else {
+            const slideDir = rng() < 0.5 ? -1 : 1;
+            if (canDisplace(x + slideDir, y + 1, SAND)) {
+              const target = getCell(x + slideDir, y + 1);
+              setCell(x + slideDir, y + 1, SAND);
+              setCell(x, y, target === EMPTY ? EMPTY : target);
+              if (y + 1 < GRID_H) processed[y + 1][x + slideDir] = true;
+            } else if (canDisplace(x - slideDir, y + 1, SAND)) {
+              const target = getCell(x - slideDir, y + 1);
+              setCell(x - slideDir, y + 1, SAND);
+              setCell(x, y, target === EMPTY ? EMPTY : target);
+              if (y + 1 < GRID_H) processed[y + 1][x - slideDir] = true;
+            }
+          }
+        } else if (cell === WATER) {
+          if (isEmpty(x, y + 1)) {
+            setCell(x, y + 1, WATER);
+            setCell(x, y, EMPTY);
+            processed[y + 1][x] = true;
+          } else {
+            const slideDir = rng() < 0.5 ? -1 : 1;
+            if (isEmpty(x + slideDir, y + 1)) {
+              setCell(x + slideDir, y + 1, WATER);
+              setCell(x, y, EMPTY);
+              if (y + 1 < GRID_H) processed[y + 1][x + slideDir] = true;
+            } else if (isEmpty(x - slideDir, y + 1)) {
+              setCell(x - slideDir, y + 1, WATER);
+              setCell(x, y, EMPTY);
+              if (y + 1 < GRID_H) processed[y + 1][x - slideDir] = true;
+            } else if (isEmpty(x + slideDir, y)) {
+              setCell(x + slideDir, y, WATER);
+              setCell(x, y, EMPTY);
+              processed[y][x + slideDir] = true;
+            } else if (isEmpty(x - slideDir, y)) {
+              setCell(x - slideDir, y, WATER);
+              setCell(x, y, EMPTY);
+              processed[y][x - slideDir] = true;
+            }
+          }
+        } else if (cell === ACID) {
+          let moved = false;
+          
+          if (y + 1 < GRID_H) {
+            const below = getCell(x, y + 1);
+            if (below === EMPTY) {
+              setCell(x, y + 1, ACID);
+              setCell(x, y, EMPTY);
+              processed[y + 1][x] = true;
+              moved = true;
+            } else if (below === SAND || below === WOOD) {
+              if (rng() < 0.4) {
+                setCell(x, y + 1, EMPTY);
+                setCell(x, y, EMPTY);
+                moved = true;
+              }
+            }
+          }
+          
+          if (!moved) {
+            const slideDir = rng() < 0.5 ? -1 : 1;
+            const nx1 = x + slideDir;
+            const nx2 = x - slideDir;
+            
+            if (isEmpty(nx1, y + 1)) {
+              setCell(nx1, y + 1, ACID);
+              setCell(x, y, EMPTY);
+              if (y + 1 < GRID_H) processed[y + 1][nx1] = true;
+            } else if (isEmpty(nx2, y + 1)) {
+              setCell(nx2, y + 1, ACID);
+              setCell(x, y, EMPTY);
+              if (y + 1 < GRID_H) processed[y + 1][nx2] = true;
+            } else if (isEmpty(nx1, y)) {
+              setCell(nx1, y, ACID);
+              setCell(x, y, EMPTY);
+              processed[y][nx1] = true;
+            } else if (isEmpty(nx2, y)) {
+              setCell(nx2, y, ACID);
+              setCell(x, y, EMPTY);
+              processed[y][nx2] = true;
+            } else {
+              for (let dy = -1; dy <= 1; dy++) {
+                for (let dx = -1; dx <= 1; dx++) {
+                  if (dx === 0 && dy === 0) continue;
+                  const nx = x + dx;
+                  const ny = y + dy;
+                  const neighbor = getCell(nx, ny);
+                  if ((neighbor === SAND || neighbor === WOOD) && rng() < 0.15) {
+                    setCell(nx, ny, EMPTY);
+                    if (rng() < 0.3) {
+                      setCell(x, y, EMPTY);
+                    }
+                    break;
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  
+  function spawnSand() {
+    const centerX = Math.floor(GRID_W / 2);
+    for (let i = -1; i <= 1; i++) {
+      const sx = centerX + i;
+      if (sx >= 0 && sx < GRID_W && isEmpty(sx, 0)) {
+        setCell(sx, 0, SAND);
+      }
+    }
+  }
+  
+  function spawnWater(progress) {
+    waterX = Math.floor(10 + Math.sin(progress * Math.PI * 4) * 35 + GRID_W / 2 - 10);
+    waterX = Math.max(2, Math.min(GRID_W - 3, waterX));
+    
+    for (let i = -1; i <= 1; i++) {
+      const sx = waterX + i;
+      if (sx >= 0 && sx < GRID_W && isEmpty(sx, 0)) {
+        setCell(sx, 0, WATER);
+      }
+    }
+  }
+  
+  function spawnAcid() {
+    const numDrops = 2 + Math.floor(rng() * 3);
+    for (let i = 0; i < numDrops; i++) {
+      const ax = Math.floor(rng() * GRID_W);
+      if (isEmpty(ax, 0)) {
+        setCell(ax, 0, ACID);
+      }
+    }
+  }
+  
+  function draw() {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    
+    for (let y = 0; y < GRID_H; y++) {
+      for (let x = 0; x < GRID_W; x++) {
+        const cell = grid[y][x];
+        if (cell !== EMPTY) {
+          ctx.fillStyle = COLORS[cell];
+          ctx.fillRect(x * CELL_W, y * CELL_H, CELL_W + 0.5, CELL_H + 0.5);
+        }
+      }
+    }
+    
+    ctx.fillStyle = '#FFD700';
+    ctx.shadowColor = '#FFD700';
+    ctx.shadowBlur = 8;
+    const centerX = Math.floor(GRID_W / 2);
+    ctx.fillRect((centerX - 1) * CELL_W, 0, CELL_W * 3, CELL_H);
+    
+    ctx.fillStyle = '#00BFFF';
+    ctx.shadowColor = '#00BFFF';
+    ctx.fillRect((waterX - 1) * CELL_W, 0, CELL_W * 3, CELL_H);
+    
+    ctx.shadowBlur = 0;
+  }
+  
+  let lastTime = Date.now();
+  let accumulator = 0;
+  const SIM_DT = 1000 / 60;
+  
+  function tick() {
+    const nowMs = Date.now();
+    const rawDt = nowMs - lastTime;
+    lastTime = nowMs;
+    
+    const dt = Math.min(rawDt, 100);
+    accumulator += dt * speed;
+    
+    const progress = ((nowMs - syncEpochMs + phaseOffsetMs) % loop) / loop;
+    const loopIndex = Math.floor((nowMs - syncEpochMs + phaseOffsetMs) / loop);
+    
+    if (loopIndex !== lastLoopIndex) {
+      initGrid();
+      lastLoopIndex = loopIndex;
+      accumulator = 0;
+    }
+    
+    while (accumulator >= SIM_DT) {
+      accumulator -= SIM_DT;
+      frameCount++;
+      
+      spawnSand();
+      spawnSand();
+      spawnWater(progress);
+      
+      if (frameCount % 60 === 0) {
+        spawnAcid();
+      }
+      
+      updateGrid();
+    }
+    
+    draw();
+    requestAnimationFrame(tick);
+  }
+  
+  initGrid();
+  tick();
+})();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-01-26_falling_sand/claude.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-01-26_falling_sand/claude.html &bull; d95e36e
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>
