@@ -16,6 +16,8 @@ HARD REQUIREMENTS (MUST FOLLOW):
 4) Make it visually rich (depth, layering, glow/trails, coherent motion).
 - Avoid 'dead time': keep noticeable evolution across the full simulation, not just the first seconds.
 
+# Idea
+
 Create a retro 'Falling Sand' physics toy (Cellular Automata) that plays itself.
 
 The Setup:

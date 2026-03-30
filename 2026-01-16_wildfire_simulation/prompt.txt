@@ -1,3 +1,5 @@
+# Idea
+
 You are generating a single, self-contained HTML file that runs a 2D wildfire (forest fire) simulation in the browser using HTML5 Canvas.
 
 Deliverable

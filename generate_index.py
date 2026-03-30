@@ -52,16 +52,48 @@ def first_sentence(text: str, max_len: int = 120) -> str:
     return snippet
 
 
+def extract_idea(raw: str) -> str:
+    """Extract idea text from prompt.txt content.
+    
+    Supports two formats:
+    1. Newer: Has explicit '# Idea' section
+    2. Older: System requirements followed by idea content (no '# Idea' marker)
+    """
+    # Try explicit Idea section first
+    idea_match = re.search(r'#\s*Idea\s*\n(.*?)(?:\n#|\Z)', raw, re.DOTALL | re.IGNORECASE)
+    if idea_match:
+        return clean_prompt(idea_match.group(1).strip())
+    
+    # Fallback: find first line that looks like an idea description
+    # Skip: # headers, numbered bullets, dashes, system-y headers, short headers
+    SKIP_PATTERNS = [
+        r'^#',                    # Markdown headers
+        r'^\d+\)',                # Numbered bullets like "1)"
+        r'^-\s',                  # Dash bullets
+        r'^(TARGET|HARD|YOU ARE|THE SETUP):',  # System requirement labels
+        r'^---$',                 # Horizontal rules
+    ]
+    
+    for line in raw.split('\n'):
+        stripped = line.strip()
+        if not stripped:
+            continue
+        # Skip lines matching skip patterns
+        if any(re.match(p, stripped, re.IGNORECASE) for p in SKIP_PATTERNS):
+            continue
+        # Found first substantive line - clean and return
+        return clean_prompt(stripped)
+    
+    return ""
+
+
 def build_card(folder: Path) -> str:
     """Build a .card HTML block for one demo folder."""
-    # Read prompt.txt if it exists
     prompt_file = folder / "prompt.txt"
     if prompt_file.exists():
         raw = prompt_file.read_text(encoding="utf-8", errors="replace")
-        # Extract the Idea section only
-        idea_match = re.search(r'#\s*Idea\s*\n(.*?)(?:\n#|\Z)', raw, re.DOTALL | re.IGNORECASE)
-        idea_text = clean_prompt(idea_match.group(1).strip()) if idea_match else ""
-        prompt_snippet = first_sentence(idea_text, max_len=140)
+        idea_text = extract_idea(raw)
+        prompt_snippet = first_sentence(idea_text, max_len=140) if idea_text else "No prompt available."
     else:
         prompt_snippet = "No prompt available."
 
