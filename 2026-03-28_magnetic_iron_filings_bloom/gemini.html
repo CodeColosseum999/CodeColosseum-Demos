@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Magnetic Iron Filings Bloom</title>
+<style>
+  html, body { margin: 0; background: #000; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+let seed = 1;
+function random() {
+    let t = seed += 0x6D2B79F5;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+}
+
+let params = new URLSearchParams(window.location.search);
+let w = params.has('w') ? parseInt(params.get('w')) : 416;
+let h = params.has('h') ? parseInt(params.get('h')) : 416;
+let t0 = params.has('t0') ? parseFloat(params.get('t0')) : Date.now();
+let phase = params.has('phase') ? parseFloat(params.get('phase')) : 0;
+let loop = params.has('loop') ? parseFloat(params.get('loop')) : 10000;
+let speed = params.has('speed') ? parseFloat(params.get('speed')) : 1;
+
+w = Math.max(100, Math.min(w, 3000));
+h = Math.max(100, Math.min(h, 3000));
+loop = Math.max(1000, loop);
+speed = Math.max(0.1, Math.min(speed, 10));
+
+let canvas = document.getElementById('c');
+let ctx = canvas.getContext('2d');
+let dpr = window.devicePixelRatio || 1;
+canvas.style.width = w + 'px';
+canvas.style.height = h + 'px';
+canvas.width = Math.floor(w * dpr);
+canvas.height = Math.floor(h * dpr);
+ctx.scale(dpr, dpr);
+
+let particles = [];
+let numParticles = 6000;
+let lastLoopIndex = -1;
+
+function initParticles() {
+    particles = [];
+    for (let i = 0; i < numParticles; i++) {
+        particles.push({
+            x: random() * w,
+            y: random() * h,
+            vx: 0,
+            vy: 0,
+            life: random() * 150,
+            maxLife: 50 + random() * 150
+        });
+    }
+}
+
+let lastTime = Date.now();
+let baseScale = Math.min(w, h) / 416;
+let strength = 2000000 * Math.pow(baseScale, 3);
+let speedLimit = 350 * baseScale;
+let epsilon = 1500 * baseScale * baseScale; 
+
+function frame() {
+    requestAnimationFrame(frame);
+    let now = Date.now();
+    let dt = Math.min((now - lastTime) / 1000, 0.05);
+    lastTime = now;
+    
+    let timeElapsed = now - t0 + phase;
+    let loopIndex = Math.floor(timeElapsed / loop);
+    let progress = (timeElapsed % loop) / loop;
+    if (progress < 0) {
+        progress += 1;
+        loopIndex -= 1;
+    }
+    
+    if (loopIndex !== lastLoopIndex) {
+        seed = 12345 + loopIndex * 999;
+        initParticles();
+        lastLoopIndex = loopIndex;
+        
+        ctx.globalCompositeOperation = 'source-over';
+        ctx.fillStyle = '#000';
+        ctx.fillRect(0, 0, w, h);
+    }
+    
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.06)';
+    ctx.fillRect(0, 0, w, h);
+    
+    ctx.globalCompositeOperation = 'lighter';
+    
+    let cx = w/2 + w*0.3 * Math.cos(progress * Math.PI * 2);
+    let cy = h/2 + h*0.2 * Math.sin(progress * Math.PI * 4);
+    let theta = progress * Math.PI * 2;
+    let d = Math.min(w, h) * 0.18;
+    
+    let xN = cx + Math.cos(theta) * d;
+    let yN = cy + Math.sin(theta) * d;
+    let xS = cx - Math.cos(theta) * d;
+    let yS = cy - Math.sin(theta) * d;
+    
+    let dtSim = dt * speed;
+    
+    ctx.beginPath();
+    
+    for (let i = 0; i < numParticles; i++) {
+        let p = particles[i];
+        let oldX = p.x;
+        let oldY = p.y;
+        
+        let dxN = p.x - xN;
+        let dyN = p.y - yN;
+        let rN2 = dxN*dxN + dyN*dyN + epsilon; 
+        let rN = Math.sqrt(rN2);
+        let BxN = strength * dxN / (rN * rN2);
+        let ByN = strength * dyN / (rN * rN2);
+
+        let dxS = p.x - xS;
+        let dyS = p.y - yS;
+        let rS2 = dxS*dxS + dyS*dyS + epsilon;
+        let rS = Math.sqrt(rS2);
+        let BxS = -strength * dxS / (rS * rS2);
+        let ByS = -strength * dyS / (rS * rS2);
+
+        let Bx = BxN + BxS;
+        let By = ByN + ByS;
+        
+        let mag = Math.sqrt(Bx*Bx + By*By) + 0.001;
+        let v = Math.min(mag, speedLimit);
+        
+        let magRatio = Math.min(1, mag / speedLimit);
+        let noiseX = (random() - 0.5) * 20 * baseScale * magRatio;
+        let noiseY = (random() - 0.5) * 20 * baseScale * magRatio;
+        
+        p.vx = p.vx * 0.7 + (Bx / mag * v + noiseX) * 0.3;
+        p.vy = p.vy * 0.7 + (By / mag * v + noiseY) * 0.3;
+        
+        p.x += p.vx * dtSim;
+        p.y += p.vy * dtSim;
+        
+        p.life -= dtSim * 60; 
+        
+        let distN = Math.sqrt(dxN*dxN + dyN*dyN);
+        let distS = Math.sqrt(dxS*dxS + dyS*dyS);
+        
+        let respawned = false;
+        if (p.life <= 0 || p.x < -w*0.1 || p.x > w*1.1 || p.y < -h*0.1 || p.y > h*1.1 || distN < 10 * baseScale || distS < 10 * baseScale) {
+            p.x = random() * w;
+            p.y = random() * h;
+            p.vx = 0;
+            p.vy = 0;
+            p.life = p.maxLife;
+            respawned = true;
+        }
+        
+        if (!respawned) {
+            ctx.moveTo(oldX, oldY);
+            ctx.lineTo(p.x, p.y);
+        }
+    }
+    
+    ctx.strokeStyle = 'rgba(0, 140, 255, 0.05)';
+    ctx.lineWidth = 4 * baseScale;
+    ctx.stroke();
+    
+    ctx.strokeStyle = 'rgba(210, 230, 255, 0.15)';
+    ctx.lineWidth = 1.2 * baseScale;
+    ctx.stroke();
+}
+requestAnimationFrame(frame);
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-03-28_magnetic_iron_filings_bloom/gemini.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-03-28_magnetic_iron_filings_bloom/gemini.html &bull; b3e2d41
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>

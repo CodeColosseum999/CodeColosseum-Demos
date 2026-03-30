@@ -1,0 +1,26 @@
+# System Requirements
+
+You are a senior creative-coder + frontend engineer. Produce ONE self-contained HTML file with embedded CSS + JS.
+
+TARGET: a polished, visually compelling animation/simulation.
+
+HARD REQUIREMENTS (MUST FOLLOW):
+
+1) Headline behavior check (system-level): the main "promise" of the scene must be clearly visible. It must not be so rare that it often fails to appear. If the concept supports repetition, it should occur multiple times, but at minimum it must occur clearly at least once.
+- No "dead air": the main visual action must remain clearly present. Avoid designs where the primary effect stalls or disappears for long stretches (e.g., spawners getting blocked so nothing happens for seconds). If the concept uses emission/spawners, ensure emission cannot permanently stall (pick alternate spawn locations, clear the spawn lane, or overwrite when safe).
+
+2) Dark background (#000 or similar).
+- No external assets/resources (no fonts/images/network).
+- Use Canvas 2D, SVG, or CSS only.
+
+3) Make it visually rich (depth, layering, glow/trails, coherent motion).
+- Avoid 'dead time': keep noticeable evolution across the full simulation, not just the first seconds.
+
+---
+
+# Idea
+
+Reveal an invisible magnetic field using thousands of iron filings.
+1. The Rule: A hidden dipole magnet moves slowly in a looping path across the screen.
+2. The Physics: Tiny filings must align to the local magnetic field direction and reorganize continuously as the magnet moves.
+3. The Visual: Dense black-silver textures should bloom into elegant arcs and chains, with subtle neon edge glow on a dark background.

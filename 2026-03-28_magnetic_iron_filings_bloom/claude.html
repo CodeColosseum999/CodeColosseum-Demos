@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+html, body { margin: 0; background: #000; overflow: hidden; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function() {
+  let params = new URLSearchParams(window.location.search);
+  let w = parseInt(params.get('w')) || 416;
+  let h = parseInt(params.get('h')) || 416;
+  let dpr = window.devicePixelRatio || 1;
+  let loop = parseInt(params.get('loop')) || 10000;
+  let speed = parseFloat(params.get('speed')) || 1;
+  let t0 = params.has('t0') ? parseInt(params.get('t0')) : Date.now();
+  let phase = params.has('phase') ? parseInt(params.get('phase')) : 0;
+
+  w = Math.max(64, Math.min(w, 4096));
+  h = Math.max(64, Math.min(h, 4096));
+  loop = Math.max(1000, Math.min(loop, 60000));
+  speed = Math.max(0.01, Math.min(speed, 10));
+
+  let canvas = document.getElementById('c');
+  canvas.style.width = w + 'px';
+  canvas.style.height = h + 'px';
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
+  let ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  function mulberry32(a) {
+    return function() {
+      a |= 0; a = a + 0x6D2B79F5 | 0;
+      let t = Math.imul(a ^ a >>> 15, 1 | a);
+      t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+      return ((t ^ t >>> 14) >>> 0) / 4294967296;
+    };
+  }
+
+  let NUM_FILINGS = 3500;
+  let filingX = new Float32Array(NUM_FILINGS);
+  let filingY = new Float32Array(NUM_FILINGS);
+  let filingAngle = new Float32Array(NUM_FILINGS);
+  let filingLen = new Float32Array(NUM_FILINGS);
+  let filingBright = new Float32Array(NUM_FILINGS);
+  let prevLoopIndex = -1;
+
+  function seedFilings(seed) {
+    let rng = mulberry32(seed);
+    for (let i = 0; i < NUM_FILINGS; i++) {
+      filingX[i] = rng() * w;
+      filingY[i] = rng() * h;
+      filingAngle[i] = rng() * Math.PI * 2;
+      filingLen[i] = 2.5 + rng() * 3.5;
+      filingBright[i] = 0.3 + rng() * 0.7;
+    }
+  }
+
+  function dipoleField(px, py, dx, dy, theta) {
+    let rx = px - dx;
+    let ry = py - dy;
+    let r2 = rx * rx + ry * ry;
+    let minR2 = 400;
+    if (r2 < minR2) r2 = minR2;
+    let r = Math.sqrt(r2);
+    let r3 = r2 * r;
+    let r5 = r3 * r2;
+    let mx = Math.cos(theta);
+    let my = Math.sin(theta);
+    let mdotr = mx * rx + my * ry;
+    let bx = (3 * mdotr * rx / r5 - mx / r3);
+    let by = (3 * mdotr * ry / r5 - my / r3);
+    return [bx, by];
+  }
+
+  let lastTime = 0;
+
+  function render(now) {
+    requestAnimationFrame(render);
+
+    let elapsed = Date.now() - t0 + phase;
+    let loopIndex = Math.floor(elapsed / loop);
+    let progress = (elapsed % loop) / loop;
+
+    if (loopIndex !== prevLoopIndex) {
+      seedFilings(loopIndex * 7919 + 42);
+      prevLoopIndex = loopIndex;
+    }
+
+    let dt = lastTime === 0 ? 16 : Math.min(now - lastTime, 50);
+    lastTime = now;
+    let dtSim = dt * speed * 0.001;
+
+    let t = progress * Math.PI * 2;
+    let pathScale = w * 0.25;
+    let cx = w * 0.5;
+    let cy = h * 0.5;
+    let denom = 1 + Math.sin(t) * Math.sin(t);
+    let dipoleX = cx + pathScale * Math.cos(t) / denom;
+    let dipoleY = cy + pathScale * Math.sin(t) * Math.cos(t) / denom;
+
+    let dipoleTheta = t * 0.5 + Math.PI * 0.25;
+
+    let poleSpacing = 30;
+    let pole1x = dipoleX + Math.cos(dipoleTheta) * poleSpacing;
+    let pole1y = dipoleY + Math.sin(dipoleTheta) * poleSpacing;
+    let pole2x = dipoleX - Math.cos(dipoleTheta) * poleSpacing;
+    let pole2y = dipoleY - Math.sin(dipoleTheta) * poleSpacing;
+
+    ctx.globalCompositeOperation = 'source-over';
+    ctx.fillStyle = 'rgba(0,0,0,0.22)';
+    ctx.fillRect(0, 0, w, h);
+
+    ctx.globalCompositeOperation = 'lighter';
+
+    for (let i = 0; i < NUM_FILINGS; i++) {
+      let fx = filingX[i];
+      let fy = filingY[i];
+
+      let b1 = dipoleField(fx, fy, pole1x, pole1y, dipoleTheta);
+      let b2 = dipoleField(fx, fy, pole2x, pole2y, dipoleTheta + Math.PI);
+      let bx = b1[0] + b2[0];
+      let by = b1[1] + b2[1];
+
+      let bMag = Math.sqrt(bx * bx + by * by);
+      let targetAngle = Math.atan2(by, bx);
+
+      let currentAngle = filingAngle[i];
+      let diff = targetAngle - currentAngle;
+      diff = diff - Math.floor((diff + Math.PI) / (Math.PI * 2)) * Math.PI * 2;
+      if (diff > Math.PI * 0.5) diff -= Math.PI;
+      if (diff < -Math.PI * 0.5) diff += Math.PI;
+
+      let alignSpeed = Math.min(bMag * 800000, 12);
+      filingAngle[i] = currentAngle + diff * Math.min(alignSpeed * dtSim, 0.95);
+
+      let attractStrength = Math.min(bMag * 2e8, 15) * dtSim;
+      let toDipoleX = dipoleX - fx;
+      let toDipoleY = dipoleY - fy;
+      let toDist = Math.sqrt(toDipoleX * toDipoleX + toDipoleY * toDipoleY);
+      if (toDist > 20) {
+        filingX[i] += (toDipoleX / toDist) * attractStrength * 0.35;
+        filingY[i] += (toDipoleY / toDist) * attractStrength * 0.35;
+      }
+
+      if (toDist < 35) {
+        filingX[i] -= (toDipoleX / toDist) * 0.5;
+        filingY[i] -= (toDipoleY / toDist) * 0.5;
+      }
+
+      if (filingX[i] < -10) filingX[i] += w + 20;
+      if (filingX[i] > w + 10) filingX[i] -= w + 20;
+      if (filingY[i] < -10) filingY[i] += h + 20;
+      if (filingY[i] > h + 10) filingY[i] -= h + 20;
+
+      let intensity = Math.min(bMag * 150000, 1);
+      let finalAngle = filingAngle[i];
+      let len = filingLen[i];
+      let bright = filingBright[i];
+
+      let cosA = Math.cos(finalAngle);
+      let sinA = Math.sin(finalAngle);
+      let halfLen = len * 0.5;
+      let x1 = filingX[i] - cosA * halfLen;
+      let y1 = filingY[i] - sinA * halfLen;
+      let x2 = filingX[i] + cosA * halfLen;
+      let y2 = filingY[i] + sinA * halfLen;
+
+      let baseR = Math.floor(140 + 80 * bright * intensity);
+      let baseG = Math.floor(145 + 75 * bright * intensity);
+      let baseB = Math.floor(155 + 70 * bright * intensity);
+      let alpha = 0.3 + 0.7 * intensity * bright;
+
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.strokeStyle = 'rgba(' + baseR + ',' + baseG + ',' + baseB + ',' + alpha.toFixed(3) + ')';
+      ctx.lineWidth = 0.8 + intensity * 0.8;
+      ctx.stroke();
+    }
+
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < NUM_FILINGS; i++) {
+      let fx = filingX[i];
+      let fy = filingY[i];
+      let dx = fx - dipoleX;
+      let dy = fy - dipoleY;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+      let glowRadius = w * 0.35;
+
+      if (dist < glowRadius) {
+        let glowIntensity = (1 - dist / glowRadius);
+        glowIntensity = glowIntensity * glowIntensity * 0.3;
+
+        if (glowIntensity > 0.02) {
+          let finalAngle = filingAngle[i];
+          let len = filingLen[i] * 1.2;
+          let cosA = Math.cos(finalAngle);
+          let sinA = Math.sin(finalAngle);
+          let halfLen = len * 0.5;
+          let x1 = fx - cosA * halfLen;
+          let y1 = fy - sinA * halfLen;
+          let x2 = fx + cosA * halfLen;
+          let y2 = fy + sinA * halfLen;
+
+          let nr = Math.floor(30 + 40 * glowIntensity);
+          let ng = Math.floor(160 + 80 * glowIntensity);
+          let nb = Math.floor(220 + 35 * glowIntensity);
+
+          ctx.beginPath();
+          ctx.moveTo(x1, y1);
+          ctx.lineTo(x2, y2);
+          ctx.strokeStyle = 'rgba(' + nr + ',' + ng + ',' + nb + ',' + glowIntensity.toFixed(3) + ')';
+          ctx.lineWidth = 2 + glowIntensity * 2;
+          ctx.stroke();
+        }
+      }
+    }
+
+    let poleGlowR = 25 + 10 * Math.sin(progress * Math.PI * 4);
+
+    let grad1 = ctx.createRadialGradient(pole1x, pole1y, 0, pole1x, pole1y, poleGlowR);
+    grad1.addColorStop(0, 'rgba(255,60,30,0.06)');
+    grad1.addColorStop(1, 'rgba(255,60,30,0)');
+    ctx.fillStyle = grad1;
+    ctx.fillRect(0, 0, w, h);
+
+    let grad2 = ctx.createRadialGradient(pole2x, pole2y, 0, pole2x, pole2y, poleGlowR);
+    grad2.addColorStop(0, 'rgba(30,80,255,0.06)');
+    grad2.addColorStop(1, 'rgba(30,80,255,0)');
+    ctx.fillStyle = grad2;
+    ctx.fillRect(0, 0, w, h);
+  }
+
+  seedFilings(42);
+  requestAnimationFrame(render);
+})();
+</script>
+
+
+<!-- CodeColosseum Watermark v1 -->
+<div data-cc-watermark="1" data-cc-id="2026-03-28_magnetic_iron_filings_bloom/claude.html" style="position:fixed;bottom:10px;right:10px;opacity:0.55;font-size:12px;line-height:1.2;color:#b0b0b0;z-index:999999;pointer-events:none;font-family:system-ui,-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;mix-blend-mode:screen;user-select:none;">
+  Generated for Code Colosseum &bull; 2026-03-28_magnetic_iron_filings_bloom/claude.html &bull; b3e2d41
+</div>
+<script data-cc-watermark-script="1">
+  console.log("%cSTOP!%c This code was generated for Code Colosseum.", "font-size:20px;color:#ff3b3b;font-weight:800;", "font-size:14px;color:#ddd;font-weight:600;");
+</script>
+
+</body>
+</html>
